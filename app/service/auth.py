@@ -56,7 +56,7 @@ async def login_user(email: str, password: str, response: Response, db: Session)
         expires=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",  # Available to all API routes
         samesite="lax",
-        # domain=FE_DOMAIN,  # Set to your frontend domain
+        domain=FE_DOMAIN,  # Set to your frontend domain
         secure=HTTPS_ENABLED,  # Set to False in development if not using HTTPS
     )
 
@@ -79,7 +79,7 @@ async def login_user(email: str, password: str, response: Response, db: Session)
         expires=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS,
         path="/",
         samesite="lax",
-        # domain=FE_DOMAIN,  # Set to your frontend domain
+        domain=FE_DOMAIN,  # Set to your frontend domain
         secure=HTTPS_ENABLED,
     )
 
@@ -120,7 +120,7 @@ async def generate_access_token(user_id: int, response: Response, db: Session):
         expires=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",  # Available to all API routes
         samesite="lax",
-        # domain=FE_DOMAIN,  # Set to your frontend domain
+        domain=FE_DOMAIN,  # Set to your frontend domain
         secure=HTTPS_ENABLED,  # Set to False in development if not using HTTPS
     )
     logger.info("Generate access token service process ended")
