@@ -1,0 +1,6 @@
+region        = "ap-southeast-1"
+ami_id = "ami-02c7683e4ca3ebf58" # Ubuntu 20.04 LTS AMI
+instance_type = "t2.micro"
+key_name = "test1_key" # Name of your existing AWS EC2 key pair
+ssh_cidr_blocks = ["0.0.0.0/0"] # Change this to your IP for better security
+volume_size   = 8 # Size of the root volume in GB

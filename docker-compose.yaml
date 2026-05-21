@@ -1,0 +1,18 @@
+services:
+  backend:
+    env_file:
+      - .env.backend
+    ports:
+      - "8000:8000"
+    restart: always
+    container_name: coop_pms_core_service
+    image: ghcr.io/dushmanthasse/coop_pms_core_service:${TAG}
+    volumes:
+      - ./attachments:/home/attachments
+
+  frontend:
+    ports:
+      - "3000:3000"
+    restart: always
+    container_name: coop_pms_fe_service
+    image: ghcr.io/dushmanthasse/coop_pms_fe_service:${TAG}

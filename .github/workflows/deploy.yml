@@ -1,0 +1,88 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches: [ v1.0.2-ec2 ]
+    paths:
+      - 'app/**'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+
+env:
+  IMAGE_NAME: ghcr.io/${{ secrets.GHCR_USERNAME }}/coop_pms_core_service
+  SERVICE_NAME: backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+
+      - name: Set image version tag
+        id: tag
+        run: echo "TAG=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t $IMAGE_NAME:${TAG} .
+          docker push $IMAGE_NAME:${TAG}
+
+      - name: Decode EC2 SSH private key
+        run: echo "${{ secrets.EC2_SSH_KEY }}" | base64 --decode > ec2_key.pem && chmod 600 ec2_key.pem
+
+      - name: Create .env file
+        run: |
+          cat <<'EOF' > .env
+          ACCESS_SECRET_KEY=${{ secrets.ACCESS_SECRET_KEY }}
+          MYSQL_HOST=${{ secrets.MYSQL_HOST }}
+          MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }}
+          REFRESH_SECRET_KEY=${{ secrets.REFRESH_SECRET_KEY }}
+          ALLOW_ORIGINS=${{ vars.ALLOW_ORIGINS }}
+          ATTACHMENTS_DIR=${{ vars.ATTACHMENTS_DIR }}
+          ATTACHMENTS_URL=${{ vars.ATTACHMENTS_URL }}
+          FE_DOMAIN=${{ vars.FE_DOMAIN }}
+          HTTPS_ENABLED=${{ vars.HTTPS_ENABLED }}
+          MYSQL_DB_NAME=${{ vars.MYSQL_DB_NAME }}
+          MYSQL_USERNAME=${{ vars.MYSQL_USERNAME }}
+          EOF
+
+      - name: Copy .env file to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ec2_key.pem .env ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USER }}/.env.backend
+
+      - name: Deploy to EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+            set -e
+            cd /home/${{ secrets.EC2_USER }}
+
+            chmod 600 .env.backend
+          
+            export TAG=${TAG}
+          
+            echo "Logging in to GitHub Container Registry"
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+          
+            echo "Stopping running container"
+            docker compose stop $SERVICE_NAME
+          
+            echo "Removing old container"
+            docker compose rm -f $SERVICE_NAME
+          
+            echo "Removing old image"
+            docker image prune -af
+          
+            echo "Pulling latest image"
+            docker pull $IMAGE_NAME:${TAG}
+          
+            echo "Starting service with new image"
+            docker compose up -d $SERVICE_NAME
+          EOF
