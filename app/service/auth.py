@@ -67,8 +67,8 @@ async def login_user(email: str, password: str, response: Response, db: Session)
         max_age=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS,
         expires=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS,
         path="/v1/auth/refresh",  # Only sent to the refresh endpoint
-        samesite="lax",
-        secure=HTTPS_ENABLED,  # Set to False in development if not using HTTPS
+        samesite="none",
+        secure=True,  # Set to False in development if not using HTTPS
     )
 
     response.set_cookie(
