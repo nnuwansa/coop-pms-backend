@@ -34,18 +34,33 @@ app.add_middleware(
 )
 
 
+# @app.middleware("http")
+# async def clean_expired_tokens_middleware(request: Request, call_next):
+#     # Clean expired tokens every hour (based on request timestamp)
+#     current_hour = datetime.now(utc).hour
+#     if current_hour % 1 == 0 and datetime.now(utc).minute < 5:
+#         db = next(get_db())
+#         await clean_expired_tokens(db)
+#         logger.info("Expired refresh tokens cleaned")
+#
+#     response = await call_next(request)
+#     return response
+
+
 @app.middleware("http")
 async def clean_expired_tokens_middleware(request: Request, call_next):
-    # Clean expired tokens every hour (based on request timestamp)
-    current_hour = datetime.now(utc).hour
-    if current_hour % 1 == 0 and datetime.now(utc).minute < 5:
+    now = datetime.now(utc)
+    # Only run at the start of each hour (minute 0-4)
+    if now.minute < 5:
         db = next(get_db())
-        await clean_expired_tokens(db)
-        logger.info("Expired refresh tokens cleaned")
+        try:
+            await clean_expired_tokens(db)
+            logger.info("Expired refresh tokens cleaned")
+        finally:
+            db.close()
 
     response = await call_next(request)
     return response
-
 
 @app.get("/attachments/{file_path:path}")
 def serve_attachment(
