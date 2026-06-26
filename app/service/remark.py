@@ -24,12 +24,20 @@ async def create_remarks_and_attachments(letter_id: int, attachments: List[Uploa
 
     await validate_files(attachments)
 
+    # remark = Remark(
+    #     letter_id=letter_id,
+    #     content=content,
+    #     status=letter.status.name if letter.status else None,
+    #     department=letter.department.name if letter.department else None,
+    #     assignee=letter.assignee.email if letter.assignee else None,
+    # )
     remark = Remark(
         letter_id=letter_id,
         content=content,
         status=letter.status.name if letter.status else None,
-        department=letter.department.name if letter.department else None,
-        assignee=letter.assignee.email if letter.assignee else None,
+        department=", ".join([ld.department.name for ld in letter.departments]) if letter.departments else None,
+        assignee=", ".join([f"{la.assignee.first_name} {la.assignee.last_name}" for la in
+                            letter.assignees]) if letter.assignees else None,
     )
     remark = await create_remark(remark, db)
     folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter_id}", f"remark_{remark.id}")

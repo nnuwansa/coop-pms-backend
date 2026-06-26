@@ -7,12 +7,16 @@ from db.models.models import Organization
 logger = getLogger(__name__)
 
 
+# async def save_organization(organization: Organization, db: Session):
+#     db.add(organization)
+#     db.commit()
+#     db.refresh(organization)
+#     return organization
 async def save_organization(organization: Organization, db: Session):
     db.add(organization)
     db.commit()
     db.refresh(organization)
     return organization
-
 
 async def get_organization_by_id(org_id: int, db: Session):
     return db.query(Organization).filter(Organization.id == org_id).first()

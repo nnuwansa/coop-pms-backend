@@ -13,11 +13,13 @@ from config.constant import LETTERS_EXCEL_HEADERS
 from crud.letter import (save_letter, get_active_letter, update_letter, get_all_letter, code_exist,
                          update_letter_attribute, validate_attribute, letters_excel_data, get_letter_count,
                          get_all_status_counts)
-from db.models.models import Letter, LetterAttachment
+from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
+                               SystemUser, Department, Status, History as HistoryModel)
 from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException
 from models.history import HistoryModelOut
-from models.letter import LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne, LetterModelOutList, \
-    RemarksModelOut, AttachmentModelOut, IdNameModelOut, LetterExcelFilter
+from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne,
+                            LetterModelOutList, RemarksModelOut, AttachmentModelOut, IdNameModelOut,
+                            LetterExcelFilter)
 from models.system_user import SystemUserWithPermissionsModelOut
 from service.history import generate_history
 from utils.files import validate_files, save_attachment, delete_file, duplicate_file
@@ -26,16 +28,21 @@ logger = getLogger(__name__)
 
 
 async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
-    logger.info("Create letter process started")
-
     if await code_exist(letter_model.code, db):
         raise CodeExistException(f"Letter with code {letter_model.code} is already exist.")
 
-    letter = Letter(**letter_model.model_dump())
+    letter_data = letter_model.model_dump(exclude={'assignee_ids', 'department_ids'})
+    letter = Letter(**letter_data)
     letter.status_id = 1
     saved_letter = await save_letter(letter, db)
 
-    logger.info("Create letter process ended")
+    for assignee_id in (letter_model.assignee_ids or []):
+        db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id))
+
+    for department_id in (letter_model.department_ids or []):
+        db.add(LetterDepartment(letter_id=saved_letter.id, department_id=department_id))
+
+    db.commit()
     return {'id': saved_letter.id, 'code': saved_letter.code}
 
 
@@ -54,7 +61,7 @@ async def get_letter_by_id(
 
     history = []
     if 'letter.history' in current_user.permissions:
-        history = [HistoryModelOut.model_validate(letter) for letter in reversed(letter_db.history)]
+        history = [HistoryModelOut.model_validate(h) for h in reversed(letter_db.history)]
 
     remarks = []
     if 'remark.view' in current_user.permissions:
@@ -78,7 +85,7 @@ async def get_letter_by_id(
         create_datetime=letter_db.create_datetime,
         subject=letter_db.subject,
         other=letter_db.other,
-        content=letter_db.content,
+        content=None,
         sender=letter_db.sender,
         email=letter_db.email,
         telephone=letter_db.telephone,
@@ -86,14 +93,21 @@ async def get_letter_by_id(
         organization=IdNameModelOut.model_validate(letter_db.organization) if letter_db.organization else None,
         remarks=remarks,
         history=history,
-        department=IdNameModelOut.model_validate(letter_db.department) if letter_db.department else None,
         status=IdNameModelOut.model_validate(letter_db.status) if letter_db.status else None,
-        assignee=IdNameModelOut(
-            id=letter_db.assignee.id,
-            name=f"{letter_db.assignee.first_name} {letter_db.assignee.last_name}",
-        ) if letter_db.assignee else None,
+        status_id=letter_db.status_id,
         related_letters=related_letters,
-        attachments=await _make_attachments(letter_db.attachments, letter_id)
+        attachments=await _make_attachments(letter_db.attachments, letter_id),
+        departments=[
+            IdNameModelOut(id=ld.department.id, name=ld.department.name)
+            for ld in letter_db.departments if ld.department
+        ],
+        assignees=[
+            IdNameModelOut(
+                id=la.assignee.id,
+                name=f"{la.assignee.first_name} {la.assignee.last_name}"
+            )
+            for la in letter_db.assignees if la.assignee
+        ],
     )
 
     logger.info("Fetch letter process end")
@@ -124,6 +138,30 @@ async def _make_remark_attachments(attachments: List, letter_id: int, remark_id:
         )
         for attachment in attachments
     ]
+
+
+async def get_remarks_by_letter_id(letter_id: int, db: Session) -> List[RemarksModelOut]:
+    logger.info("Fetch remarks process started")
+
+    letter_db = await get_active_letter(letter_id, db)
+    if not letter_db:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found.")
+
+    remarks = [
+        RemarksModelOut(
+            id=remark.id,
+            content=remark.content,
+            create_datetime=remark.create_datetime,
+            department=remark.department,
+            status=remark.status,
+            assignee=remark.assignee,
+            attachments=await _make_remark_attachments(remark.attachments, letter_id, remark.id),
+        )
+        for remark in reversed(letter_db.remarks) if remark.is_active
+    ]
+
+    logger.info("Fetch remarks process end")
+    return remarks
 
 
 async def update_letter_by_id(letter_id: int, letter_model: LetterModelIn, db: Session) -> LetterModelOut:
@@ -164,10 +202,13 @@ async def get_list_letters(
             code=letter.code,
             create_datetime=letter.received_datetime,
             subject=letter.subject,
-            department=letter.department.name if letter.department else None,
             status=letter.status.name if letter.status else None,
             organization=letter.organization.name if letter.organization else None,
-            assignee=f"{letter.assignee.first_name} {letter.assignee.last_name}" if letter.assignee else None,
+            department=", ".join([ld.department.name for ld in letter.departments]) if letter.departments else None,
+            assignee=", ".join([
+                f"{la.assignee.first_name} {la.assignee.last_name}"
+                for la in letter.assignees
+            ]) if letter.assignees else None,
             other=letter.other,
         )
         for letter in letters_db
@@ -263,7 +304,6 @@ async def switch_letter_attribute(
     if current_value is not None:
         if current_value != current_id:
             raise NoDataFoundException(f"The {attribute} mismatch with current_id")
-
         current_entity = await validate_attribute(attribute, current_id, db)
     else:
         current_entity = None
@@ -286,10 +326,12 @@ async def switch_letter_attribute(
     )
     logger.info("History persisting process end")
 
-    return {'letter_id': updated_letter.id,
-            'attribute': attribute,
-            'current_id': next_id,
-            'previous_id': current_id}
+    return {
+        'letter_id': updated_letter.id,
+        'attribute': attribute,
+        'current_id': next_id,
+        'previous_id': current_id
+    }
 
 
 async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWithPermissionsModelOut, db: Session):
@@ -312,14 +354,27 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
         for _, col_name in selected_headers:
             if "." in col_name:
                 parent, child = col_name.split(".")
-                value = getattr(getattr(obj, parent), child) if getattr(obj, parent) else None
+                if parent == "department":
+                    value = ", ".join([
+                        getattr(ld.department, child)
+                        for ld in obj.departments if ld.department
+                    ]) if obj.departments else None
+                elif parent == "assignee":
+                    value = ", ".join([
+                        f"{la.assignee.first_name} {la.assignee.last_name}"
+                        for la in obj.assignees if la.assignee
+                    ]) if obj.assignees else None
+                else:
+                    value = getattr(getattr(obj, parent), child) if getattr(obj, parent, None) else None
             elif col_name == "assignee":
-                value = f"{obj.assignee.first_name} {obj.assignee.last_name}" if obj.assignee else None
+                value = ", ".join([
+                    f"{la.assignee.first_name} {la.assignee.last_name}"
+                    for la in obj.assignees if la.assignee
+                ]) if obj.assignees else None
             elif col_name == "attachments":
                 value = len(obj.attachments) if obj.attachments else 0
             elif col_name in ["received_datetime", "create_datetime", "update_datetime"]:
-                value = getattr(obj, col_name).replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime(
-                    "%Y-%m-%d")
+                value = getattr(obj, col_name).replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d")
             else:
                 value = getattr(obj, col_name)
             row_data.append(value)
@@ -343,11 +398,7 @@ async def generate_letter_code(datetime_utc: datetime, db: Session) -> str:
     count = await get_letter_count(prefix, db)
     number = count + 1
 
-    year_local = date_local.year
-    month_local = date_local.month
-    day_local = date_local.day
-
-    code = f"T{year_local}{month_local:02d}{day_local:02d}{number:02d}"
+    code = f"T{date_local.year}{date_local.month:02d}{date_local.day:02d}{number:02d}"
     logger.info("Generate letter code process end")
     return code
 
@@ -399,3 +450,112 @@ async def duplicate_letter(letter_id: int, db: Session):
 
     logger.info("Duplicate letter process end")
     return {"id": letter_copy.id, "code": letter_copy.code}
+
+
+async def update_letter_assignment(
+        letter_id: int,
+        status_id: Optional[int],
+        department_ids: List[int],
+        assignee_ids: List[int],
+        db: Session,
+        username: str = "System",
+        email: str = "",
+):
+    logger.info("Update letter assignment process started")
+
+    letter = await get_active_letter(letter_id, db)
+    if not letter:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    # ── Status ────────────────────────────────────────────────────────────────
+    if status_id and status_id != letter.status_id:
+        old_status = letter.status
+        new_status = db.query(Status).filter(Status.id == status_id, Status.is_active).first()
+        if new_status:
+            desc = (
+                f"Status changed from {old_status.name} to {new_status.name}"
+                if old_status else
+                f"Status set to {new_status.name}"
+            )
+            letter.status_id = status_id
+            db.add(HistoryModel(
+                description=desc,
+                username=username,
+                email=email,
+                letter_id=letter_id
+            ))
+
+    # ── Departments ───────────────────────────────────────────────────────────
+    old_dept_ids = {ld.department_id for ld in letter.departments}
+    new_dept_ids = set(department_ids)
+
+    if old_dept_ids != new_dept_ids:
+        added = new_dept_ids - old_dept_ids
+        removed = old_dept_ids - new_dept_ids
+
+        db.query(LetterDepartment).filter(LetterDepartment.letter_id == letter_id).delete()
+        for dept_id in department_ids:
+            db.add(LetterDepartment(letter_id=letter_id, department_id=dept_id))
+
+        for dept_id in added:
+            dept = db.query(Department).filter(Department.id == dept_id).first()
+            if dept:
+                db.add(HistoryModel(
+                    description=f"Department added: {dept.name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id
+                ))
+        for dept_id in removed:
+            dept = db.query(Department).filter(Department.id == dept_id).first()
+            if dept:
+                db.add(HistoryModel(
+                    description=f"Department removed: {dept.name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id
+                ))
+    else:
+        # No change — still replace to keep data consistent
+        db.query(LetterDepartment).filter(LetterDepartment.letter_id == letter_id).delete()
+        for dept_id in department_ids:
+            db.add(LetterDepartment(letter_id=letter_id, department_id=dept_id))
+
+    # ── Assignees ─────────────────────────────────────────────────────────────
+    old_assignee_ids = {la.assignee_id for la in letter.assignees}
+    new_assignee_ids = set(assignee_ids)
+
+    if old_assignee_ids != new_assignee_ids:
+        added = new_assignee_ids - old_assignee_ids
+        removed = old_assignee_ids - new_assignee_ids
+
+        db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
+        for assignee_id in assignee_ids:
+            db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
+
+        for a_id in added:
+            user = db.query(SystemUser).filter(SystemUser.id == a_id).first()
+            if user:
+                db.add(HistoryModel(
+                    description=f"Assignee added: {user.first_name} {user.last_name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id
+                ))
+        for a_id in removed:
+            user = db.query(SystemUser).filter(SystemUser.id == a_id).first()
+            if user:
+                db.add(HistoryModel(
+                    description=f"Assignee removed: {user.first_name} {user.last_name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id
+                ))
+    else:
+        # No change — still replace to keep data consistent
+        db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
+        for assignee_id in assignee_ids:
+            db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
+
+    db.commit()
+    logger.info("Update letter assignment process ended")

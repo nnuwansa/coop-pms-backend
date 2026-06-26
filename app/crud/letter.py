@@ -3,7 +3,7 @@ from logging import getLogger
 from sqlalchemy import exists, select, and_, func
 from sqlalchemy.orm import Session
 
-from db.models.models import Letter, Status, SystemUser, Department
+from db.models.models import Letter, Status, SystemUser, Department,LetterAssignee,LetterDepartment
 from exception.exception import NoDataFoundException
 from models.letter import LetterFilter
 from models.system_user import SystemUserWithPermissionsModelOut
@@ -45,14 +45,14 @@ async def get_all_letter(
     conditions = [Letter.is_active]
 
     if 'letter.view:department' in current_user.permissions:
-        conditions.append(Letter.department_id == current_user.department_id)
+        conditions.append(LetterDepartment.department_id == current_user.department_id)
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(Letter.assignee_id == current_user.id)
+        conditions.append(LetterAssignee.assignee_id == current_user.id)
     elif 'letter.view:all' in current_user.permissions:
         if filters.department_id:
-            conditions.append(Letter.department_id == filters.department_id)
+            conditions.append(LetterDepartment.department_id == filters.department_id)
         if filters.assignee_id:
-            conditions.append(Letter.assignee_id == filters.assignee_id)
+            conditions.append(LetterAssignee.assignee_id == filters.assignee_id)
     else:
         return 0, []
 
@@ -124,9 +124,9 @@ async def update_letter_attribute(
 async def letters_excel_data(db, current_user, filters):
     conditions = [Letter.is_active]
     if 'letter.view:department' in current_user.permissions:
-        conditions.append(Letter.department_id == current_user.department_id)
+        conditions.append(LetterDepartment.department_id == current_user.department_id)
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(Letter.assignee_id == current_user.id)
+        conditions.append(LetterAssignee.assignee_id == current_user.id)
     elif 'letter.view:all' not in current_user.permissions:
         return []
 
@@ -154,9 +154,9 @@ async def get_letter_count(prefix: str, db: Session) -> int:
 async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut, db: Session):
     conditions = [Letter.is_active]
     if 'letter.view:department' in current_user.permissions:
-        conditions.append(Letter.department_id == current_user.department_id)
+        conditions.append(LetterDepartment.department_id == current_user.department_id)
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(Letter.assignee_id == current_user.id)
+        conditions.append(LetterAssignee.assignee_id == current_user.id)
     elif 'letter.view:all' not in current_user.permissions:
         return []
 

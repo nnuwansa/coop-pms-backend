@@ -15,6 +15,43 @@ class ActionEnum(enum.Enum):
     check = "check"
 
 
+# class Letter(Base):
+#     __tablename__ = "letter"
+#
+#     id = Column(Integer, primary_key=True, autoincrement=True)
+#     code = Column(String(255), index=True, nullable=False)
+#     received_datetime = Column(DateTime, default=func.utc_timestamp())
+#     subject = Column(String(255), nullable=False)
+#     other = Column(Text)
+#     content = Column(Text)
+#     sender = Column(String(255))
+#     email = Column(String(255))
+#     telephone = Column(String(20))
+#     # assignee_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)
+#     source_id = Column(Integer, ForeignKey("source.id"))
+#     assignees = relationship("LetterAssignee", back_populates="letter")
+#     departments = relationship("LetterDepartment", back_populates="letter")
+#     organization_id = Column(Integer, ForeignKey("organization.id"))
+#     # department_id = Column(Integer, ForeignKey("department.id"))
+#     status_id = Column(Integer, ForeignKey("status.id"))
+#     create_datetime = Column(DateTime, default=func.utc_timestamp())
+#     update_datetime = Column(DateTime, default=func.utc_timestamp(),
+#                              onupdate=func.utc_timestamp())
+#     is_active = Column(Boolean, default=True)
+#
+#     # Relationships
+#     remarks = relationship("Remark", back_populates="letter")
+#     history = relationship("History")
+#     related_letters1 = relationship("LetterRelation", foreign_keys="[LetterRelation.letter_id]")
+#     related_letters2 = relationship("LetterRelation", foreign_keys="[LetterRelation.related_letter_id]")
+#     department = relationship("Department")
+#     status = relationship("Status")
+#     assignee = relationship("SystemUser")
+#     attachments = relationship("LetterAttachment")
+#     source = relationship("Source")
+#     organization = relationship("Organization")
+#
+
 class Letter(Base):
     __tablename__ = "letter"
 
@@ -27,14 +64,11 @@ class Letter(Base):
     sender = Column(String(255))
     email = Column(String(255))
     telephone = Column(String(20))
-    assignee_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)
     source_id = Column(Integer, ForeignKey("source.id"))
     organization_id = Column(Integer, ForeignKey("organization.id"))
-    department_id = Column(Integer, ForeignKey("department.id"))
     status_id = Column(Integer, ForeignKey("status.id"))
     create_datetime = Column(DateTime, default=func.utc_timestamp())
-    update_datetime = Column(DateTime, default=func.utc_timestamp(),
-                             onupdate=func.utc_timestamp())
+    update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     is_active = Column(Boolean, default=True)
 
     # Relationships
@@ -42,13 +76,12 @@ class Letter(Base):
     history = relationship("History")
     related_letters1 = relationship("LetterRelation", foreign_keys="[LetterRelation.letter_id]")
     related_letters2 = relationship("LetterRelation", foreign_keys="[LetterRelation.related_letter_id]")
-    department = relationship("Department")
     status = relationship("Status")
-    assignee = relationship("SystemUser")
     attachments = relationship("LetterAttachment")
     source = relationship("Source")
     organization = relationship("Organization")
-
+    assignees = relationship("LetterAssignee", back_populates="letter")
+    departments = relationship("LetterDepartment", back_populates="letter")
 
 class LetterRelation(Base):
     __tablename__ = "letter_relation"
@@ -142,15 +175,39 @@ class Source(Base):
     is_active = Column(Boolean, default=True)
 
 
+
+
 class Organization(Base):
     __tablename__ = "organization"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), nullable=False)
+    address = Column(String(500), nullable=True)
+    email = Column(String(255), nullable=True)
+    telephone = Column(String(20), nullable=True)
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     is_active = Column(Boolean, default=True)
 
+
+
+class LetterAssignee(Base):
+    __tablename__ = "letter_assignee"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    letter_id = Column(Integer, ForeignKey("letter.id"))
+    assignee_id = Column(Integer, ForeignKey("system_user.id"))
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
+    letter = relationship("Letter", back_populates="assignees")
+    assignee = relationship("SystemUser")
+
+class LetterDepartment(Base):
+    __tablename__ = "letter_department"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    letter_id = Column(Integer, ForeignKey("letter.id"))
+    department_id = Column(Integer, ForeignKey("department.id"))
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
+    letter = relationship("Letter", back_populates="departments")
+    department = relationship("Department")
 
 class Role(Base):
     __tablename__ = "role"

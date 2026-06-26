@@ -9,9 +9,13 @@ async def create_remark(remark: Remark, db: Session) -> Remark:
     return remark
 
 
+# async def get_active_remark(remark_id: int, db: Session) -> Remark | None:
+#     return db.query(Remark).filter(Remark.id == remark_id and Remark.is_active).first()
 async def get_active_remark(remark_id: int, db: Session) -> Remark | None:
-    return db.query(Remark).filter(Remark.id == remark_id and Remark.is_active).first()
-
+    return db.query(Remark).filter(
+        Remark.id == remark_id,
+        Remark.is_active == True
+    ).first()
 
 async def update_remark_db(remark: Remark, db: Session) -> Remark:
     db.commit()

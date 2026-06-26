@@ -3,16 +3,19 @@ from datetime import datetime
 from math import ceil
 from typing import Optional, List
 
-from fastapi import APIRouter, Path, UploadFile, Depends
+from fastapi import APIRouter, Path, UploadFile, Depends, Body
 from fastapi.params import Form, File
 from starlette.responses import StreamingResponse
+from pydantic import BaseModel
 
 from db.session import DbSession
+from db.models.models import History as HistoryModel
 from exception.exception import UnauthorizedException
 from models.letter import (
     LetterModelIn,
     LetterFilter, SwitchAttributeType, SwitchLetterAttribute, LetterExcelFilter
 )
+from models.history import HistoryModelOut
 from models.response import GenericResponse, GenericResponsePaginated
 from models.system_user import SystemUserWithPermissionsModelOut
 from service.letter import (
@@ -20,8 +23,16 @@ from service.letter import (
     get_letter_by_id,
     delete_letter_by_id,
     update_letter_by_id,
-    get_list_letters, bind_letter_attachment, update_letter_attachments,
-    switch_letter_attribute, letters_excel, generate_letter_code, get_letter_stats, duplicate_letter
+    get_remarks_by_letter_id,
+    get_list_letters,
+    bind_letter_attachment,
+    update_letter_attachments,
+    switch_letter_attribute,
+    letters_excel,
+    generate_letter_code,
+    get_letter_stats,
+    duplicate_letter,
+    update_letter_assignment as _update_assignment,
 )
 from service.remark import create_remarks_and_attachments, update_remark_and_attachments, delete_remark_by_id
 from utils.auth import get_current_user, has_permission
@@ -97,18 +108,18 @@ async def delete_letter_by_id_api(
     return GenericResponse(message='Letter deleted successfully')
 
 
-@router.post("/{letter_id}/remark", response_model=GenericResponse)
-async def add_remark(
-        db: DbSession,
-        letter_id: int,
-        content: str = Form(...),
-        attachments: Optional[List[UploadFile]] = File(default=None),
-        _=Depends(has_permission("remark.create"))
-):
-    logger.debug(f"Request to add remark with ID: {letter_id}")
-    attachments = attachments or []
-    remark_id = await create_remarks_and_attachments(letter_id, attachments, content, db)
-    return GenericResponse(data={"remark_id": remark_id}, message="Remark created successfully")
+# @router.post("/{letter_id}/remark", response_model=GenericResponse)
+# async def add_remark(
+#         db: DbSession,
+#         letter_id: int,
+#         content: str = Form(...),
+#         attachments: Optional[List[UploadFile]] = File(default=None),
+#         _=Depends(has_permission("remark.create"))
+# ):
+#     logger.debug(f"Request to add remark with ID: {letter_id}")
+#     attachments = attachments or []
+#     remark_id = await create_remarks_and_attachments(letter_id, attachments, content, db)
+#     return GenericResponse(data={"remark_id": remark_id}, message="Remark created successfully")
 
 
 @router.put("/remark/{remark_id}", response_model=GenericResponse)
@@ -124,7 +135,48 @@ async def update_remark(
     await update_remark_and_attachments(remark_id, content, attachments, db)
     return GenericResponse(message="Remark updated successfully")
 
+@router.get("/{letter_id}/remarks", response_model=GenericResponse)
+async def list_remarks_api(
+        db: DbSession,
+        letter_id: int = Path(...),
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user)
+):
+    remarks = await get_remarks_by_letter_id(letter_id, db)  # write this service fn
+    return GenericResponse(data=remarks, message="Remarks fetched successfully")
 
+
+
+class RemarkIn(BaseModel):
+    content: str
+
+# @router.post("/{letter_id}/remarks", response_model=GenericResponse)
+# async def add_remark_api(
+#         db: DbSession,
+#         letter_id: int,
+#         remark_in: RemarkIn,
+#         _=Depends(has_permission("remark.create"))
+# ):
+#     remark_id = await create_remarks_and_attachments(letter_id, [], remark_in.content, db)
+#     return GenericResponse(data={"id": remark_id}, message="Remark created successfully")
+
+@router.post("/{letter_id}/remarks", response_model=GenericResponse)
+async def add_remark_api(
+        db: DbSession,
+        letter_id: int,
+        remark_in: RemarkIn = Body(...),
+        _=Depends(has_permission("remark.create"))
+):
+    remark_id = await create_remarks_and_attachments(letter_id, [], remark_in.content, db)
+    return GenericResponse(data={"id": remark_id}, message="Remark created successfully")
+@router.post("/{letter_id}/remarks/{remark_id}/attachments", response_model=GenericResponse)
+async def add_remark_attachments_api(
+        db: DbSession,
+        letter_id: int,
+        remark_id: int,
+        attachments: Optional[List[UploadFile]] = File(default=None),
+):
+    # bind attachments to remark
+    ...
 @router.delete("/remark/{remark_id}", response_model=GenericResponse)
 async def delete_remark_by_id_api(
         db: DbSession,
@@ -250,3 +302,42 @@ async def duplicate_letter_api(
 
     new_letter_data = await duplicate_letter(letter_id, db)
     return GenericResponse(data=new_letter_data, message="Letter duplicated successfully")
+
+
+
+class LetterAssignmentIn(BaseModel):
+    status_id: Optional[int] = None
+    department_ids: List[int] = []
+    assignee_ids: List[int] = []
+
+
+@router.put("/assignment/{letter_id}", response_model=GenericResponse)
+async def update_letter_assignment_api(
+        letter_id: int,
+        payload: LetterAssignmentIn,
+        db: DbSession,
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
+        _=Depends(has_permission("letter.update"))
+):
+    await _update_assignment(
+        letter_id,
+        payload.status_id,
+        payload.department_ids,
+        payload.assignee_ids,
+        db,
+        username=f"{current_user.first_name} {current_user.last_name}",
+        email=current_user.email
+    )
+    return GenericResponse(message="Letter updated successfully")
+@router.get("/{letter_id}/history", response_model=GenericResponse)
+async def get_letter_history_api(
+        db: DbSession,
+        letter_id: int = Path(...),
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user)
+):
+    history = db.query(HistoryModel).filter(
+        HistoryModel.letter_id == letter_id
+    ).order_by(HistoryModel.create_datetime.desc()).all()
+
+    result = [HistoryModelOut.model_validate(h) for h in history]
+    return GenericResponse(data=result, message="History fetched successfully")

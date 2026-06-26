@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
-
+from typing import Optional, List
 from pydantic import BaseModel, field_validator
 
 
@@ -18,18 +18,26 @@ class LetterFilter(BaseModel):
     other: Optional[str] = None
 
 
+
 class LetterModelIn(BaseModel):
     code: str
     received_datetime: datetime
     subject: Optional[str] = None
     other: Optional[str] = None
-    content: Optional[str] = None
     sender: Optional[str] = None
     email: Optional[str] = None
     telephone: Optional[str] = None
     source_id: Optional[int] = None
     organization_id: Optional[int] = None
+    assignee_ids: Optional[List[int]] = []
+    department_ids: Optional[List[int]] = []
 
+    @field_validator('sender', 'email', 'telephone', 'other', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v):
+        if v == "":
+            return None
+        return v
 
 class LetterModelOut(BaseModel):
     id: int
@@ -104,11 +112,13 @@ class LetterModelOutOne(BaseModel):
     remarks: list[RemarksModelOut]
     history: list
     related_letters: list
-    department: Optional[IdNameModelOut]
     status: Optional[IdNameModelOut]
-    assignee: Optional[IdNameModelOut]
+    status_id: Optional[int] = None
     attachments: list[AttachmentModelOut]
-    content: str
+    content: Optional[str] = None
+    departments: list[IdNameModelOut] = []
+    assignees: list[IdNameModelOut] = []
+
 
     @field_validator('received_datetime', 'create_datetime', mode='after')
     @classmethod
@@ -149,3 +159,10 @@ class LetterExcelFilter(BaseModel):
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
     columns: Optional[list[str]] = None
+
+
+
+class LetterAssignmentIn(BaseModel):
+    status_id: Optional[int] = None
+    department_ids: List[int] = []
+    assignee_ids: List[int] = []
