@@ -33,8 +33,9 @@ from service.letter import (
     get_letter_stats,
     duplicate_letter,
     update_letter_assignment as _update_assignment,
+
 )
-from service.remark import create_remarks_and_attachments, update_remark_and_attachments, delete_remark_by_id
+from service.remark import create_remarks_and_attachments, update_remark_and_attachments, delete_remark_by_id,bind_remark_attachments,)
 from utils.auth import get_current_user, has_permission
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,7 @@ async def list_remarks_api(
 
 class RemarkIn(BaseModel):
     content: str
+    subject_no: Optional[str] = None
 
 # @router.post("/{letter_id}/remarks", response_model=GenericResponse)
 # async def add_remark_api(
@@ -166,7 +168,9 @@ async def add_remark_api(
         remark_in: RemarkIn = Body(...),
         _=Depends(has_permission("remark.create"))
 ):
-    remark_id = await create_remarks_and_attachments(letter_id, [], remark_in.content, db)
+    remark_id = await create_remarks_and_attachments(
+        letter_id, [], remark_in.content, db, subject_no=remark_in.subject_no
+    )
     return GenericResponse(data={"id": remark_id}, message="Remark created successfully")
 @router.post("/{letter_id}/remarks/{remark_id}/attachments", response_model=GenericResponse)
 async def add_remark_attachments_api(
@@ -174,9 +178,11 @@ async def add_remark_attachments_api(
         letter_id: int,
         remark_id: int,
         attachments: Optional[List[UploadFile]] = File(default=None),
+        _=Depends(has_permission("remark.create"))
 ):
-    # bind attachments to remark
-    ...
+    attachments = attachments or []
+    filenames = await bind_remark_attachments(letter_id, remark_id, attachments, db)
+    return GenericResponse(data={"filenames": filenames}, message="Remark attachments bound successfully")
 @router.delete("/remark/{remark_id}", response_model=GenericResponse)
 async def delete_remark_by_id_api(
         db: DbSession,
@@ -341,3 +347,5 @@ async def get_letter_history_api(
 
     result = [HistoryModelOut.model_validate(h) for h in history]
     return GenericResponse(data=result, message="History fetched successfully")
+
+

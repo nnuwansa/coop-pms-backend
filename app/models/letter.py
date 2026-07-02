@@ -27,6 +27,7 @@ class LetterModelIn(BaseModel):
     sender: Optional[str] = None
     email: Optional[str] = None
     telephone: Optional[str] = None
+    sender_subject_no: Optional[str] = None  # NEW
     source_id: Optional[int] = None
     organization_id: Optional[int] = None
     assignee_ids: Optional[List[int]] = []
@@ -49,6 +50,7 @@ class LetterModelOut(BaseModel):
     sender: Optional[str]
     email: Optional[str]
     telephone: Optional[str]
+    sender_subject_no: Optional[str] = None  # NEW
     source_id: Optional[int]
     organization_id: Optional[int]
 
@@ -77,6 +79,7 @@ class AttachmentModelOut(BaseModel):
 class RemarksModelOut(BaseModel):
     id: int
     content: str
+    subject_no: Optional[str] = None  # NEW
     create_datetime: datetime
     department: Optional[str]
     status: Optional[str]
@@ -107,6 +110,7 @@ class LetterModelOutOne(BaseModel):
     sender: Optional[str]
     email: Optional[str]
     telephone: Optional[str]
+    sender_subject_no: Optional[str] = None  # NEW
     source: Optional[IdNameModelOut]
     organization: Optional[IdNameModelOut]
     remarks: list[RemarksModelOut]

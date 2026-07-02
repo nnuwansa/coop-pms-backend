@@ -69,6 +69,7 @@ async def get_letter_by_id(
             RemarksModelOut(
                 id=remark.id,
                 content=remark.content,
+                subject_no=remark.subject_no,  # NEW
                 create_datetime=remark.create_datetime,
                 department=remark.department,
                 status=remark.status,
@@ -89,6 +90,7 @@ async def get_letter_by_id(
         sender=letter_db.sender,
         email=letter_db.email,
         telephone=letter_db.telephone,
+        sender_subject_no=letter_db.sender_subject_no,  # NEW
         source=IdNameModelOut.model_validate(letter_db.source) if letter_db.source else None,
         organization=IdNameModelOut.model_validate(letter_db.organization) if letter_db.organization else None,
         remarks=remarks,
@@ -151,6 +153,7 @@ async def get_remarks_by_letter_id(letter_id: int, db: Session) -> List[RemarksM
         RemarksModelOut(
             id=remark.id,
             content=remark.content,
+            subject_no=remark.subject_no,  # NEW
             create_datetime=remark.create_datetime,
             department=remark.department,
             status=remark.status,

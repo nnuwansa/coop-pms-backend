@@ -64,6 +64,7 @@ class Letter(Base):
     sender = Column(String(255))
     email = Column(String(255))
     telephone = Column(String(20))
+    sender_subject_no = Column(String(50), nullable=True)  # NEW
     source_id = Column(Integer, ForeignKey("source.id"))
     organization_id = Column(Integer, ForeignKey("organization.id"))
     status_id = Column(Integer, ForeignKey("status.id"))
@@ -101,6 +102,7 @@ class Remark(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     letter_id = Column(Integer, ForeignKey(LETTER_DOT_ID))
     content = Column(Text, nullable=False)
+    sender_subject_no = Column(String(50), nullable=True)  # NEW
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     status = Column(String(100))

@@ -15,7 +15,55 @@ from utils.files import validate_files, save_attachment, delete_file
 logger = getLogger(__name__)
 
 
-async def create_remarks_and_attachments(letter_id: int, attachments: List[UploadFile], content: str, db: Session):
+# async def create_remarks_and_attachments(letter_id: int, attachments: List[UploadFile], content: str, db: Session):
+#     logger.info("Create remarks process started")
+#
+#     letter = await get_active_letter(letter_id, db)
+#     if not letter:
+#         raise LetterNotFoundException(f"Letter not found for ID: {letter_id}")
+#
+#     await validate_files(attachments)
+#
+#     # remark = Remark(
+#     #     letter_id=letter_id,
+#     #     content=content,
+#     #     status=letter.status.name if letter.status else None,
+#     #     department=letter.department.name if letter.department else None,
+#     #     assignee=letter.assignee.email if letter.assignee else None,
+#     # )
+#     remark = Remark(
+#         letter_id=letter_id,
+#         content=content,
+#         status=letter.status.name if letter.status else None,
+#         department=", ".join([ld.department.name for ld in letter.departments]) if letter.departments else None,
+#         assignee=", ".join([f"{la.assignee.first_name} {la.assignee.last_name}" for la in
+#                             letter.assignees]) if letter.assignees else None,
+#     )
+#     remark = await create_remark(remark, db)
+#     folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter_id}", f"remark_{remark.id}")
+#
+#     for file in attachments:
+#         saved_file_name = save_attachment(file, folder_path)
+#         attachment = RemarkAttachment(
+#             remark_id=remark.id,
+#             title=file.filename,
+#             file_name=saved_file_name
+#         )
+#         db.add(attachment)
+#
+#     db.commit()
+#
+#     logger.info("Create remarks process end")
+#     return remark.id
+
+
+async def create_remarks_and_attachments(
+        letter_id: int,
+        attachments: List[UploadFile],
+        content: str,
+        db: Session,
+        subject_no: str = None,   # NEW
+):
     logger.info("Create remarks process started")
 
     letter = await get_active_letter(letter_id, db)
@@ -24,16 +72,10 @@ async def create_remarks_and_attachments(letter_id: int, attachments: List[Uploa
 
     await validate_files(attachments)
 
-    # remark = Remark(
-    #     letter_id=letter_id,
-    #     content=content,
-    #     status=letter.status.name if letter.status else None,
-    #     department=letter.department.name if letter.department else None,
-    #     assignee=letter.assignee.email if letter.assignee else None,
-    # )
     remark = Remark(
         letter_id=letter_id,
         content=content,
+        subject_no=subject_no,   # NEW
         status=letter.status.name if letter.status else None,
         department=", ".join([ld.department.name for ld in letter.departments]) if letter.departments else None,
         assignee=", ".join([f"{la.assignee.first_name} {la.assignee.last_name}" for la in
@@ -44,15 +86,13 @@ async def create_remarks_and_attachments(letter_id: int, attachments: List[Uploa
 
     for file in attachments:
         saved_file_name = save_attachment(file, folder_path)
-        attachment = RemarkAttachment(
+        db.add(RemarkAttachment(
             remark_id=remark.id,
             title=file.filename,
             file_name=saved_file_name
-        )
-        db.add(attachment)
+        ))
 
     db.commit()
-
     logger.info("Create remarks process end")
     return remark.id
 
@@ -61,41 +101,82 @@ async def update_remark_and_attachments(
         remark_id: int,
         content: str,
         attachments: List[UploadFile],
-        db: Session
+        db: Session,
+        subject_no: str = None,   # NEW
 ):
-    logger.info(f"Update remark process started for remark_id={remark_id}")
+    ...
+    remark.content = content
+    remark.subject_no = subject_no   # NEW
+    remark.status = letter.status.name if letter.status else None
+    remark.department = letter.department.name if letter.department else None
+    remark.assignee = letter.assignee.email if letter.assignee else None
+    ...
+
+
+# NEW function — attachments endpoint එකෙන් call කරන්නේ මේක
+async def bind_remark_attachments(letter_id: int, remark_id: int, attachments: List[UploadFile], db: Session) -> List[str]:
+    logger.info("Binding remark attachment process started")
 
     remark = await get_active_remark(remark_id, db)
     if not remark:
         raise NoDataFoundException(f"Remark with ID {remark_id} not found")
 
-    letter = remark.letter
-    if not letter:
-        raise LetterNotFoundException(f"Letter not found in remark ID: {remark_id}")
-
     await validate_files(attachments)
 
-    folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter.id}", f"remark_{remark_id}")
-    for old_attachment in remark.attachments:
-        db.delete(old_attachment)
-        delete_file(folder_path, old_attachment.file_name)
-
-    remark.content = content
-    remark.status = letter.status.name if letter.status else None
-    remark.department = letter.department.name if letter.department else None
-    remark.assignee = letter.assignee.email if letter.assignee else None
-
+    filenames = []
+    folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter_id}", f"remark_{remark_id}")
     for file in attachments:
         saved_file_name = save_attachment(file, folder_path)
         db.add(RemarkAttachment(
-            remark_id=remark.id,
+            remark_id=remark_id,
             title=file.filename,
             file_name=saved_file_name
         ))
+        filenames.append(file.filename)
 
     db.commit()
-    logger.info(f"Update remark process completed for remark_id={remark_id}")
+    logger.info("Binding remark attachment process end")
+    return filenames
 
+# async def update_remark_and_attachments(
+#         remark_id: int,
+#         content: str,
+#         attachments: List[UploadFile],
+#         db: Session
+# ):
+#     logger.info(f"Update remark process started for remark_id={remark_id}")
+#
+#     remark = await get_active_remark(remark_id, db)
+#     if not remark:
+#         raise NoDataFoundException(f"Remark with ID {remark_id} not found")
+#
+#     letter = remark.letter
+#     if not letter:
+#         raise LetterNotFoundException(f"Letter not found in remark ID: {remark_id}")
+#
+#     await validate_files(attachments)
+#
+#     folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter.id}", f"remark_{remark_id}")
+#     for old_attachment in remark.attachments:
+#         db.delete(old_attachment)
+#         delete_file(folder_path, old_attachment.file_name)
+#
+#     remark.content = content
+#     remark.status = letter.status.name if letter.status else None
+#     remark.department = letter.department.name if letter.department else None
+#     remark.assignee = letter.assignee.email if letter.assignee else None
+#
+#     for file in attachments:
+#         saved_file_name = save_attachment(file, folder_path)
+#         db.add(RemarkAttachment(
+#             remark_id=remark.id,
+#             title=file.filename,
+#             file_name=saved_file_name
+#         ))
+#
+#     db.commit()
+#     logger.info(f"Update remark process completed for remark_id={remark_id}")
+#
 
 async def delete_remark_by_id(remark_id: int, db: Session) -> int:
     logger.info("Delete remark process started")
