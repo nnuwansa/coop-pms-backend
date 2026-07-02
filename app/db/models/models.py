@@ -102,7 +102,7 @@ class Remark(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     letter_id = Column(Integer, ForeignKey(LETTER_DOT_ID))
     content = Column(Text, nullable=False)
-    sender_subject_no = Column(String(50), nullable=True)  # NEW
+    subject_no = Column(String(50), nullable=True)  # NEW
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     status = Column(String(100))
