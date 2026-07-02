@@ -35,7 +35,7 @@ from service.letter import (
     update_letter_assignment as _update_assignment,
 
 )
-from service.remark import create_remarks_and_attachments, update_remark_and_attachments, delete_remark_by_id,bind_remark_attachments,)
+from service.remark import (create_remarks_and_attachments, update_remark_and_attachments, delete_remark_by_id, bind_remark_attachments)
 from utils.auth import get_current_user, has_permission
 
 logger = logging.getLogger(__name__)
