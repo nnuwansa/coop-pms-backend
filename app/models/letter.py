@@ -140,12 +140,12 @@ class LetterModelOutList(BaseModel):
     assignee: Optional[str]
     organization: Optional[str]
     other: Optional[str]
+    sender_subject_no: Optional[str] = None   # NEW
 
     @field_validator('create_datetime', mode='after')
     @classmethod
     def ensure_timezone(cls, value):
         return value.replace(tzinfo=timezone.utc)
-
 
 class SwitchAttributeType(str, Enum):
     status = "status"

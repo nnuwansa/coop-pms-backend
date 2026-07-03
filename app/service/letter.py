@@ -213,14 +213,13 @@ async def get_list_letters(
                 for la in letter.assignees
             ]) if letter.assignees else None,
             other=letter.other,
+            sender_subject_no=letter.sender_subject_no,   # NEW
         )
         for letter in letters_db
     ]
 
     logger.info("Fetch letter process ended")
     return total, letters_response
-
-
 async def delete_letter_by_id(letter_id: int, db: Session) -> int:
     logger.info("Delete letter process started")
 
