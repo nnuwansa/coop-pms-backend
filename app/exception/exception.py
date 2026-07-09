@@ -41,3 +41,15 @@ class UnauthorizedException(Exception):
 class UnRefreshingException(Exception):
     def __init__(self, message: str):
         self.message = message
+
+
+class ValidationException(Exception):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+class FileTooLargeException(Exception):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)

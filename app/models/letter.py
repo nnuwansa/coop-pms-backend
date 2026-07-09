@@ -18,7 +18,6 @@ class LetterFilter(BaseModel):
     other: Optional[str] = None
 
 
-
 class LetterModelIn(BaseModel):
     code: str
     received_datetime: datetime
@@ -27,18 +26,20 @@ class LetterModelIn(BaseModel):
     sender: Optional[str] = None
     email: Optional[str] = None
     telephone: Optional[str] = None
-    sender_subject_no: Optional[str] = None  # NEW
+    sender_subject_no: Optional[str] = None
+    registered_post_no: Optional[str] = None   # NEW
     source_id: Optional[int] = None
     organization_id: Optional[int] = None
     assignee_ids: Optional[List[int]] = []
     department_ids: Optional[List[int]] = []
 
-    @field_validator('sender', 'email', 'telephone', 'other', mode='before')
+    @field_validator('sender', 'email', 'telephone', 'other', 'registered_post_no', mode='before')
     @classmethod
     def empty_str_to_none(cls, v):
         if v == "":
             return None
         return v
+
 
 class LetterModelOut(BaseModel):
     id: int
@@ -50,7 +51,8 @@ class LetterModelOut(BaseModel):
     sender: Optional[str]
     email: Optional[str]
     telephone: Optional[str]
-    sender_subject_no: Optional[str] = None  # NEW
+    sender_subject_no: Optional[str] = None
+    registered_post_no: Optional[str] = None   # NEW
     source_id: Optional[int]
     organization_id: Optional[int]
 
@@ -69,6 +71,7 @@ class AttachmentModelOut(BaseModel):
     title: str
     create_datetime: datetime
     url: str
+    file_size: Optional[int] = None   # NEW
 
     @field_validator('create_datetime', mode='after')
     @classmethod
@@ -79,17 +82,62 @@ class AttachmentModelOut(BaseModel):
 class RemarksModelOut(BaseModel):
     id: int
     content: str
-    subject_no: Optional[str] = None  # NEW
+    subject_no: Optional[str] = None
     create_datetime: datetime
     department: Optional[str]
     status: Optional[str]
     assignee: Optional[str]
+    created_by: Optional[str] = None   # NEW
     attachments: list[AttachmentModelOut]
 
     @field_validator('create_datetime', mode='after')
     @classmethod
     def ensure_timezone(cls, value):
         return value.replace(tzinfo=timezone.utc)
+
+
+class RemarkUpdateIn(BaseModel):          # NEW
+    content: str
+    subject_no: Optional[str] = None
+    reason: str
+
+    @field_validator('reason')
+    @classmethod
+    def reason_required(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Reason for change is required")
+        return v.strip()
+
+
+class RemarkDeleteIn(BaseModel):          # NEW
+    reason: str
+
+    @field_validator('reason')
+    @classmethod
+    def reason_required(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Reason for change is required")
+        return v.strip()
+
+
+class RemarkHistoryModelOut(BaseModel):   # NEW
+    id: int
+    remark_id: int
+    action: str
+    content_before: str
+    content_after: Optional[str] = None
+    reason: str
+    changed_by: str
+    changed_by_email: Optional[str] = None
+    create_datetime: datetime
+
+    @field_validator('create_datetime', mode='after')
+    @classmethod
+    def ensure_timezone(cls, value):
+        return value.replace(tzinfo=timezone.utc)
+
+    class Config:
+        from_attributes = True
 
 
 class IdNameModelOut(BaseModel):
@@ -110,7 +158,8 @@ class LetterModelOutOne(BaseModel):
     sender: Optional[str]
     email: Optional[str]
     telephone: Optional[str]
-    sender_subject_no: Optional[str] = None  # NEW
+    sender_subject_no: Optional[str] = None
+    registered_post_no: Optional[str] = None   # NEW
     source: Optional[IdNameModelOut]
     organization: Optional[IdNameModelOut]
     remarks: list[RemarksModelOut]
@@ -122,7 +171,6 @@ class LetterModelOutOne(BaseModel):
     content: Optional[str] = None
     departments: list[IdNameModelOut] = []
     assignees: list[IdNameModelOut] = []
-
 
     @field_validator('received_datetime', 'create_datetime', mode='after')
     @classmethod
@@ -140,12 +188,13 @@ class LetterModelOutList(BaseModel):
     assignee: Optional[str]
     organization: Optional[str]
     other: Optional[str]
-    sender_subject_no: Optional[str] = None   # NEW
+    sender_subject_no: Optional[str] = None
 
     @field_validator('create_datetime', mode='after')
     @classmethod
     def ensure_timezone(cls, value):
         return value.replace(tzinfo=timezone.utc)
+
 
 class SwitchAttributeType(str, Enum):
     status = "status"
@@ -163,7 +212,6 @@ class LetterExcelFilter(BaseModel):
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
     columns: Optional[list[str]] = None
-
 
 
 class LetterAssignmentIn(BaseModel):
