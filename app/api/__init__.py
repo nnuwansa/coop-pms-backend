@@ -10,12 +10,16 @@ from api.role import router as role_router
 from api.source import router as source_router
 from api.status import router as status_router
 from api.system_user import router as system_user_router
+from api.designation import router as designation_router
+from api.employee_name import router as employee_name_router
 
 all_routers = APIRouter()
 all_routers.include_router(letter_router)
 all_routers.include_router(source_router)
 all_routers.include_router(organization_router)
 all_routers.include_router(department_router)
+all_routers.include_router(designation_router)
+all_routers.include_router(employee_name_router)
 all_routers.include_router(status_router)
 all_routers.include_router(system_user_router)
 all_routers.include_router(role_router)

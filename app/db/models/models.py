@@ -436,7 +436,7 @@ class SystemUser(Base):
     last_name = Column(String(255), nullable=False)
     employee_id = Column(String(50), nullable=True, unique=True)
     nic = Column(String(20), nullable=True)
-    designation = Column(String(255), nullable=True)
+    designation_id = Column(Integer, ForeignKey("designation.id"), nullable=True)
     password = Column(String(255), nullable=False)
     role_id = Column(Integer, ForeignKey("role.id"))
     department_id = Column(Integer, ForeignKey("department.id"))
@@ -446,7 +446,17 @@ class SystemUser(Base):
 
     role = relationship("Role")
     department = relationship("Department")
+    designation = relationship("Designation")
 
+class Designation(Base):
+    __tablename__ = "designation"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, unique=True)
+    description = Column(String(255), nullable=True)
+    update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
+    is_active = Column(Boolean, default=True)
 
 class RefreshToken(Base):
     __tablename__ = "refresh_token"
@@ -555,6 +565,14 @@ class Department(Base):
     is_active = Column(Boolean, default=True)
 
 
+class EmployeeName(Base):
+    __tablename__ = "employee_name"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    full_name = Column(String(255), nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+    update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
 class Status(Base):
     __tablename__ = "status"
 
