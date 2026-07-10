@@ -62,6 +62,14 @@ async def clean_expired_tokens_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+@app.middleware("http")
+async def private_network_access_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
+
 @app.get("/attachments/{file_path:path}")
 def serve_attachment(
         file_path: str,
