@@ -95,6 +95,81 @@ async def update_letter(letter: Letter, db: Session) -> Letter:
 #     return total, letters
 from sqlalchemy.orm import joinedload
 
+# async def get_all_letter(
+#         offset: int,
+#         limit: int,
+#         filters: LetterFilter,
+#         current_user: SystemUserWithPermissionsModelOut,
+#         db: Session
+# ):
+#     conditions = [Letter.is_active]
+#
+#     needs_dept_join = False
+#     needs_assignee_join = False
+#
+#     if 'letter.view:department' in current_user.permissions:
+#         conditions.append(LetterDepartment.department_id == current_user.department_id)
+#         needs_dept_join = True
+#     elif 'letter.view:self' in current_user.permissions:
+#         conditions.append(LetterAssignee.assignee_id == current_user.id)
+#         needs_assignee_join = True
+#     elif 'letter.view:all' in current_user.permissions:
+#         if filters.department_id:
+#             conditions.append(LetterDepartment.department_id == filters.department_id)
+#             needs_dept_join = True
+#         if filters.assignee_id:
+#             conditions.append(LetterAssignee.assignee_id == filters.assignee_id)
+#             needs_assignee_join = True
+#     else:
+#         return 0, []
+#
+#     if filters.id:
+#         conditions.append(Letter.id == filters.id)
+#     if filters.code:
+#         conditions.append(Letter.code.ilike(f"%{filters.code}%"))
+#     if filters.subject:
+#         conditions.append(Letter.subject.ilike(f"%{filters.subject}%"))
+#     if filters.status_id:
+#         conditions.append(Letter.status_id == filters.status_id)
+#     if filters.organization_id:
+#         conditions.append(Letter.organization_id == filters.organization_id)
+#     if filters.create_date_start and filters.create_date_end:
+#         conditions.append(
+#             Letter.received_datetime.between(
+#                 filters.create_date_start,
+#                 filters.create_date_end
+#             )
+#         )
+#     if filters.other:
+#         conditions.append(Letter.other.ilike(f"%{filters.other}%"))
+#
+#     query = select(Letter.id).distinct()
+#     if needs_dept_join:
+#         query = query.join(LetterDepartment, LetterDepartment.letter_id == Letter.id)
+#     if needs_assignee_join:
+#         query = query.join(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+#     query = query.where(and_(*conditions))
+#
+#     total_stmt = select(func.count()).select_from(query.subquery())
+#     total = db.execute(total_stmt).scalar_one()
+#
+#     id_stmt = query.order_by(None).offset(offset).limit(limit)
+#     ids_result = db.execute(id_stmt).scalars().all()
+#
+#     if not ids_result:
+#         return total, []
+#
+#     letters = (
+#         db.query(Letter)
+#         .filter(Letter.id.in_(ids_result))
+#         .order_by(Letter.create_datetime.desc())
+#         .all()
+#     )
+#
+#     return total, letters
+
+from sqlalchemy.orm import joinedload
+
 async def get_all_letter(
         offset: int,
         limit: int,
@@ -143,18 +218,29 @@ async def get_all_letter(
     if filters.other:
         conditions.append(Letter.other.ilike(f"%{filters.other}%"))
 
-    query = select(Letter.id).distinct()
+    # NOTE: select id + create_datetime together (not id alone) so that
+    # ORDER BY create_datetime is valid alongside SELECT DISTINCT (Postgres
+    # requires ORDER BY expressions to appear in the select list when DISTINCT is used).
+    id_query = select(Letter.id, Letter.create_datetime).distinct()
     if needs_dept_join:
-        query = query.join(LetterDepartment, LetterDepartment.letter_id == Letter.id)
+        id_query = id_query.join(LetterDepartment, LetterDepartment.letter_id == Letter.id)
     if needs_assignee_join:
-        query = query.join(LetterAssignee, LetterAssignee.letter_id == Letter.id)
-    query = query.where(and_(*conditions))
+        id_query = id_query.join(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+    id_query = id_query.where(and_(*conditions))
 
-    total_stmt = select(func.count()).select_from(query.subquery())
+    total_stmt = select(func.count()).select_from(
+        id_query.with_only_columns(Letter.id).subquery()
+    )
     total = db.execute(total_stmt).scalar_one()
 
-    id_stmt = query.order_by(None).offset(offset).limit(limit)
-    ids_result = db.execute(id_stmt).scalars().all()
+    # ✅ Explicit, deterministic order: newest first, id as tiebreaker
+    id_stmt = (
+        id_query
+        .order_by(Letter.create_datetime.desc(), Letter.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    ids_result = [row[0] for row in db.execute(id_stmt).all()]
 
     if not ids_result:
         return total, []
