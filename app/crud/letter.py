@@ -310,20 +310,50 @@ async def get_letter_count(prefix: str, db: Session) -> int:
     return count
 
 
+# async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut, db: Session):
+#     conditions = [Letter.is_active]
+#     if 'letter.view:department' in current_user.permissions:
+#         conditions.append(LetterDepartment.department_id == current_user.department_id)
+#     elif 'letter.view:self' in current_user.permissions:
+#         conditions.append(LetterAssignee.assignee_id == current_user.id)
+#     elif 'letter.view:all' not in current_user.permissions:
+#         return []
+#
+#     result = db.execute(
+#         select(Status.id, Status.name, func.count(Letter.id).label("letter_count"))
+#         .outerjoin(Letter, Status.id == Letter.status_id)
+#         .where(and_(*conditions))
+#         .group_by(Status.id, Status.name)
+#     )
+#     status_counts = result.all()
+#     return status_counts
+
+
 async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut, db: Session):
     conditions = [Letter.is_active]
+    needs_dept_join = False
+    needs_assignee_join = False
+
     if 'letter.view:department' in current_user.permissions:
         conditions.append(LetterDepartment.department_id == current_user.department_id)
+        needs_dept_join = True
     elif 'letter.view:self' in current_user.permissions:
         conditions.append(LetterAssignee.assignee_id == current_user.id)
+        needs_assignee_join = True
     elif 'letter.view:all' not in current_user.permissions:
         return []
 
-    result = db.execute(
-        select(Status.id, Status.name, func.count(Letter.id).label("letter_count"))
+    query = (
+        select(Status.id, Status.name, func.count(func.distinct(Letter.id)).label("letter_count"))
+        .select_from(Status)
         .outerjoin(Letter, Status.id == Letter.status_id)
-        .where(and_(*conditions))
-        .group_by(Status.id, Status.name)
     )
-    status_counts = result.all()
-    return status_counts
+    if needs_dept_join:
+        query = query.join(LetterDepartment, LetterDepartment.letter_id == Letter.id)
+    if needs_assignee_join:
+        query = query.join(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+
+    query = query.where(and_(*conditions)).group_by(Status.id, Status.name)
+
+    result = db.execute(query)
+    return result.all()
