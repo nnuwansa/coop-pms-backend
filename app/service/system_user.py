@@ -122,19 +122,20 @@ async def update_system_user_info(
     new_department_id = user_model.department_id if user_model.department_id else None
     if user_db.department_id != new_department_id:
         old_department_name = user_db.department.name if user_db.department else "None"
-        new_department = db.query(Department).filter(Department.id == new_department_id).first() if new_department_id else None
+        new_department = db.query(Department).filter(
+            Department.id == new_department_id).first() if new_department_id else None
         new_department_name = new_department.name if new_department else "None"
         changes.append(f"department changed from '{old_department_name}' to '{new_department_name}'")
 
-        # Designation: compare by id, but describe by name
-        new_designation_id = user_model.designation_id if user_model.designation_id else None
-        if user_db.designation_id != new_designation_id:
-            old_designation_name = user_db.designation.name \
-        if user_db.designation else "None"
-            new_designation = db.query(Designation).filter(
-                Designation.id == new_designation_id).first() if new_designation_id else None
-            new_designation_name = new_designation.name if new_designation else "None"
-            changes.append(f"designation changed from '{old_designation_name}' to '{new_designation_name}'")
+    # Designation: compare by id, but describe by name
+    new_designation_id = user_model.designation_id if user_model.designation_id else None
+    if user_db.designation_id != new_designation_id:
+        old_designation_name = user_db.designation.name if user_db.designation else "None"
+        new_designation = db.query(Designation).filter(
+            Designation.id == new_designation_id).first() if new_designation_id else None
+        new_designation_name = new_designation.name if new_designation else "None"
+        changes.append(f"designation changed from '{old_designation_name}' to '{new_designation_name}'")
+
 
     user_db.email = user_model.email
     user_db.first_name = user_model.first_name
