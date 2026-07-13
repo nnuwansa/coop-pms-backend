@@ -229,7 +229,7 @@ class Role(Base):
 
     # Relationships
     permissions = relationship("Permission", secondary="role_permission")
-
+    allowed_statuses = relationship("RoleStatusPermission", back_populates="role")
 
 class RolePermission(Base):
     __tablename__ = "role_permission"
@@ -249,6 +249,15 @@ class Permission(Base):
     action = Column(Enum(ActionEnum), nullable=False)
     create_datetime = Column(DateTime, default=func.utc_timestamp())
 
+class RoleStatusPermission(Base):
+    __tablename__ = "role_status_permission"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    role_id = Column(Integer, ForeignKey("role.id"))
+    status_id = Column(Integer, ForeignKey("status.id"))
+
+    role = relationship("Role", back_populates="allowed_statuses")
+    status = relationship("Status")
 
 class Department(Base):
     __tablename__ = "department"

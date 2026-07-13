@@ -41,12 +41,23 @@ async def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(password_bytes, hashed_bytes)
 
 
-async def create_access_token(subject: Union[str, Any], expires_delta: timedelta, permissions: list[str]) -> str:
+async def create_access_token(
+        subject: Union[str, Any],
+        expires_delta: timedelta,
+        permissions: list[str],
+        allowed_status_ids: list[int] | None = None,   # NEW
+) -> str:
     """Create a JWT access token."""
 
     expire = datetime.now(utc) + expires_delta
 
-    to_encode = {"exp": expire, "sub": str(subject), "type": "access", "permissions": permissions}
+    to_encode = {
+        "exp": expire,
+        "sub": str(subject),
+        "type": "access",
+        "permissions": permissions,
+        "allowed_status_ids": allowed_status_ids or [],   # NEW
+    }
     encoded_jwt = jwt.encode(to_encode, ACCESS_SECRET_KEY, algorithm=ACCESS_TOKEN_ALGORITHM)
     return encoded_jwt
 

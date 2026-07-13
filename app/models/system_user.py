@@ -56,6 +56,7 @@ class SystemUserWithPermissionsModelOut(BaseModel):
     department_id: Optional[int] = None
     role: Optional[str] = None
     permissions: list[str] = []
+    allowed_status_ids: list[int] = []  # NEW
 
     class Config:
         from_attributes = True

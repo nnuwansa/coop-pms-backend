@@ -10,9 +10,9 @@ from crud.system_user import get_user_by_email, get_active_user_by_id
 from db.models.models import RefreshToken
 from exception.exception import UnauthorizedException
 from utils.security import verify_password, create_access_token, create_refresh_token
+from crud.role import get_role_status_ids
 
 logger = logging.getLogger(__name__)
-
 
 async def login_user(email: str, password: str, response: Response, db: Session):
     logger.info("Logging service process started")
@@ -26,13 +26,15 @@ async def login_user(email: str, password: str, response: Response, db: Session)
 
     if not await verify_password(password, user.password):
         raise UnauthorizedException("Incorrect username or password")
-    # Both return same message for security reasons
+
+    allowed_status_ids = await get_role_status_ids(user.role_id, db) if user.role_id else []   # NEW
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = await create_access_token(
         subject=user.id,
         expires_delta=access_token_expires,
-        permissions=[permission.code for permission in user.role.permissions]
+        permissions=[permission.code for permission in user.role.permissions],
+        allowed_status_ids=allowed_status_ids,   # NEW
     )
 
     refresh_token_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
@@ -100,16 +102,19 @@ async def logout_user(user_id: int, response: Response, db: Session):
 
 
 async def generate_access_token(user_id: int, response: Response, db: Session):
-    """Generate new access using valid refresh token."""
     logger.info("Generate access token service process started")
     user = await get_active_user_by_id(user_id, db)
+
+    allowed_status_ids = await get_role_status_ids(user.role_id, db) if user.role_id else []   # NEW
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = await create_access_token(
         subject=user_id,
         expires_delta=access_token_expires,
-        permissions=[permission.code for permission in user.role.permissions]
+        permissions=[permission.code for permission in user.role.permissions],
+        allowed_status_ids=allowed_status_ids,   # NEW
     )
+
 
     # Set new tokens as HTTP-only cookies
     response.set_cookie(
