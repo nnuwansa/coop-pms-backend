@@ -140,13 +140,11 @@ async def validate_attribute(attribute: str, entity_id: int, db: Session):
     return db.query(model).filter(and_(model.id == entity_id, model.is_active)).first()
 
 
-async def update_letter_attribute(
-        letter: Letter,
-        attribute: str,
-        new_id: int,
-        db: Session
-) -> Letter:
+async def update_letter_attribute(letter: Letter, attribute: str, new_id: int, db: Session) -> Letter:
     setattr(letter, f"{attribute}_id", new_id)
+    if attribute == "status":
+        from datetime import datetime
+        letter.status_since = datetime.utcnow()   # NEW
     db.commit()
     db.refresh(letter)
     return letter

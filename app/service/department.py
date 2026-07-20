@@ -11,14 +11,12 @@ logger = getLogger(__name__)
 
 
 async def create_department(department_model: DepartmentModelIn, db: Session):
-    logger.info("Create department process started")
-
     department = Department(
-        name=department_model.name
+        name=department_model.name,
+        email=department_model.email,   # NEW
     )
-
     department_db = await save_department(department, db)
-    department_response = DepartmentModelOut.model_validate(department_db)
+    return DepartmentModelOut.model_validate(department_db)
 
     logger.info("Create department process end")
     return department_response

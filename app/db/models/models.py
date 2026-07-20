@@ -36,6 +36,14 @@ class Letter(Base):
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     is_active = Column(Boolean, default=True)
+    status_since = Column(DateTime, default=func.utc_timestamp())  # NEW
+    last_reminder_sent = Column(DateTime, nullable=True)  # NEW
+    completion_file_name = Column(String(255), nullable=True)  # NEW
+    cheque_deposited = Column(Boolean, default=False)  # NEW
+    cheque_deposit_date = Column(DateTime, nullable=True)  # NEW
+    cheque_account_no = Column(String(100), nullable=True)  # NEW
+    cheque_bank = Column(String(150), nullable=True)  # NEW
+    cheque_branch = Column(String(150), nullable=True)  # NEW
 
     # Relationships
     remarks = relationship("Remark", back_populates="letter")
@@ -138,6 +146,7 @@ class SystemUser(Base):
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     is_active = Column(Boolean, default=False)
+    is_department_account = Column(Boolean, default=False)
 
     role = relationship("Role")
     department = relationship("Department")
@@ -267,6 +276,7 @@ class Department(Base):
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     is_active = Column(Boolean, default=True)
+    email = Column(String(255), nullable=True)
 
 
 class EmployeeName(Base):

@@ -99,3 +99,9 @@ class SystemUserHistoryOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DepartmentAccountIn(BaseModel):   # NEW
+    department_id: int
+    email: str
+    password: str

@@ -23,10 +23,21 @@ from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterMo
 from models.system_user import SystemUserWithPermissionsModelOut
 from service.history import generate_history
 from utils.files import validate_files, save_attachment, delete_file, duplicate_file
+from crud.organization import get_organization_by_id
+from utils.email import send_email
+from utils.email_templates import letter_received_email
+from exception.exception import ValidationException
+from utils.email_templates import letter_received_email
 
 logger = getLogger(__name__)
 
+from datetime import datetime, timezone
 
+def _status_days(status_since) -> Optional[int]:
+    if not status_since:
+        return None
+    since = status_since if status_since.tzinfo else status_since.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - since).days
 async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
     if await code_exist(letter_model.code, db):
         raise CodeExistException(f"Letter with code {letter_model.code} is already exist.")
@@ -43,9 +54,34 @@ async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
         db.add(LetterDepartment(letter_id=saved_letter.id, department_id=department_id))
 
     db.commit()
+
+    # NEW — notify the organization by email that their letter was received,
+    # if an organization is linked and has an email on file
+    if letter_model.organization_id:
+        organization = await get_organization_by_id(letter_model.organization_id, db)
+        if organization and organization.email:
+            email_subject, email_body = letter_received_email(
+                organization_name=organization.name,
+                letter_code=saved_letter.code,
+                subject=saved_letter.subject or "",
+                received_datetime=saved_letter.received_datetime,
+            )
+            await send_email(organization.email, email_subject, email_body)
+
     return {'id': saved_letter.id, 'code': saved_letter.code}
 
+    for department_id in (letter_model.department_ids or []):
+        department = await get_department_by_id(department_id, db)
+        if department and department.email:
+            email_subject, email_body = letter_received_email(
+                organization_name=department.name,
+                letter_code=saved_letter.code,
+                subject=saved_letter.subject or "",
+                received_datetime=saved_letter.received_datetime,
+            )
+            await send_email(department.email, email_subject, email_body)
 
+    return {'id': saved_letter.id, 'code': saved_letter.code}
 async def get_letter_by_id(
         letter_id: int,
         current_user: SystemUserWithPermissionsModelOut,
@@ -99,6 +135,8 @@ async def get_letter_by_id(
         history=history,
         status=IdNameModelOut.model_validate(letter_db.status) if letter_db.status else None,
         status_id=letter_db.status_id,
+        status_since=letter_db.status_since,
+        status_days=_status_days(letter_db.status_since),
         related_letters=related_letters,
         attachments=await _make_attachments(letter_db.attachments, letter_id),
         departments=[
@@ -112,6 +150,12 @@ async def get_letter_by_id(
             )
             for la in letter_db.assignees if la.assignee
         ],
+        completion_file_name=letter_db.completion_file_name,  # NEW — add if missing
+        cheque_deposited=letter_db.cheque_deposited or False,  # NEW — add if missing
+        cheque_deposit_date=letter_db.cheque_deposit_date,  # NEW — add if missing
+        cheque_account_no=letter_db.cheque_account_no,  # NEW — add if missing
+        cheque_bank=letter_db.cheque_bank,  # NEW — add if missing
+        cheque_branch=letter_db.cheque_branch,  # NEW — add if missing
     )
 
     logger.info("Fetch letter process end")
@@ -229,6 +273,8 @@ async def get_list_letters(
             create_datetime=letter.received_datetime,
             subject=letter.subject,
             status=letter.status.name if letter.status else None,
+            status_since=letter.status_since,
+            status_days=_status_days(letter.status_since),
             organization=letter.organization.name if letter.organization else None,
             department=", ".join([ld.department.name for ld in letter.departments]) if letter.departments else None,
             assignee=", ".join([
@@ -497,9 +543,10 @@ async def update_letter_assignment(
         username: str = "System",
         email: str = "",
         allowed_status_ids: Optional[List[int]] = None,
-        can_change_status: bool = True,  # NEW
-        can_change_department: bool = True,  # NEW
-        can_assign: bool = True,  # NEW
+        can_change_status: bool = True,
+        can_change_department: bool = True,
+        can_assign: bool = True,
+        file_name: Optional[str] = None,  # NEW
 ):
     logger.info("Update letter assignment process started")
 
@@ -507,8 +554,7 @@ async def update_letter_assignment(
     if not letter:
         raise NoDataFoundException(f"Letter with ID {letter_id} not found")
 
-    # ── Status ────────────────────────────────────────────────────────────────
-    if can_change_status and status_id and status_id != letter.status_id:  # CHANGED — gated
+    if can_change_status and status_id and status_id != letter.status_id:
         if allowed_status_ids:
             if status_id not in allowed_status_ids:
                 raise NoDataFoundException("This role is not permitted to set letters to this status")
@@ -516,13 +562,22 @@ async def update_letter_assignment(
         old_status = letter.status
         new_status = db.query(Status).filter(Status.id == status_id, Status.is_active).first()
         if new_status:
+            # NEW — require file_name when moving to "Completed"
+            if new_status.name.strip().lower() == "completed":
+                if not file_name or not file_name.strip():
+                    raise ValidationException("File Name is required when marking a letter as Completed")
+                letter.completion_file_name = file_name.strip()
+
             desc = (
                 f"Status changed from {old_status.name} to {new_status.name}"
                 if old_status else
                 f"Status set to {new_status.name}"
             )
             letter.status_id = status_id
+            letter.status_since = datetime.utcnow()
             db.add(HistoryModel(description=desc, username=username, email=email, letter_id=letter_id))
+
+
 
         # ── Departments ───────────────────────────────────────────────────────────
         if can_change_department:
@@ -537,15 +592,35 @@ async def update_letter_assignment(
                 for dept_id in department_ids:
                     db.add(LetterDepartment(letter_id=letter_id, department_id=dept_id))
 
+                # for dept_id in added:
+                #     dept = db.query(Department).filter(Department.id == dept_id).first()
+                #     if dept:
+                #         db.add(HistoryModel(
+                #             description=f"Department added: {dept.name}",
+                #             username=username,
+                #             email=email,
+                #             letter_id=letter_id
+                #         ))
+
                 for dept_id in added:
                     dept = db.query(Department).filter(Department.id == dept_id).first()
                     if dept:
                         db.add(HistoryModel(
                             description=f"Department added: {dept.name}",
-                            username=username,
-                            email=email,
-                            letter_id=letter_id
+                            username=username, email=email, letter_id=letter_id
                         ))
+                        # NEW — notify the department by email that this letter was forwarded to them
+                        if dept.email:
+                            from utils.email_templates import letter_received_email
+                            email_subject, email_body = letter_received_email(
+                                organization_name=dept.name,
+                                letter_code=letter.code,
+                                subject=letter.subject or "",
+                                received_datetime=letter.received_datetime,
+                            )
+                            await send_email(dept.email, email_subject, email_body)
+
+
                 for dept_id in removed:
                     dept = db.query(Department).filter(Department.id == dept_id).first()
                     if dept:
@@ -598,3 +673,30 @@ async def update_letter_assignment(
 
         db.commit()
         logger.info("Update letter assignment process ended")
+
+
+
+
+
+
+async def update_cheque_deposit(letter_id: int, payload: "ChequeDepositIn", db: Session, current_user) -> None:
+    letter = await get_active_letter(letter_id, db)
+    if not letter:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    if not letter.other:
+        raise ValidationException("This letter has no Cheque/Money Order number on file")
+
+    letter.cheque_deposited = payload.deposited
+    letter.cheque_deposit_date = payload.deposit_date if payload.deposited else None
+    letter.cheque_account_no = payload.account_no if payload.deposited else None
+    letter.cheque_bank = payload.bank if payload.deposited else None
+    letter.cheque_branch = payload.branch if payload.deposited else None
+
+    db.add(HistoryModel(
+        description=f"Cheque {'marked as deposited' if payload.deposited else 'deposit unmarked'}",
+        username=f"{current_user.first_name} {current_user.last_name}",
+        email=current_user.email,
+        letter_id=letter_id,
+    ))
+    db.commit()

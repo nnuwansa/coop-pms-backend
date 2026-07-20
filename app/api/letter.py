@@ -40,6 +40,8 @@ from service.remark import (
     delete_remark_by_id, bind_remark_attachments, get_remark_history,
 )
 from utils.auth import get_current_user, has_permission
+from models.letter import ChequeDepositIn
+from service.letter import update_cheque_deposit as _update_cheque_deposit
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +317,7 @@ class LetterAssignmentIn(BaseModel):
     status_id: Optional[int] = None
     department_ids: List[int] = []
     assignee_ids: List[int] = []
-
+    file_name: Optional[str] = None   # NEW
 
 # @router.put("/assignment/{letter_id}", response_model=GenericResponse)
 # async def update_letter_assignment_api(
@@ -357,9 +359,10 @@ async def update_letter_assignment_api(
         username=f"{current_user.first_name} {current_user.last_name}",
         email=current_user.email,
         allowed_status_ids=current_user.allowed_status_ids,
-        can_change_status='letter.change_status' in current_user.permissions,       # NEW
-        can_change_department='letter.change_department' in current_user.permissions,  # NEW
-        can_assign='letter.assign' in current_user.permissions,                     # NEW
+        can_change_status='letter.change_status' in current_user.permissions,
+        can_change_department='letter.change_department' in current_user.permissions,
+        can_assign='letter.assign' in current_user.permissions,
+        file_name=payload.file_name,  # NEW
     )
     return GenericResponse(message="Letter updated successfully")
 
@@ -375,3 +378,17 @@ async def get_letter_history_api(
 
     result = [HistoryModelOut.model_validate(h) for h in history]
     return GenericResponse(data=result, message="History fetched successfully")
+
+
+
+
+@router.put("/{letter_id}/cheque", response_model=GenericResponse)
+async def update_cheque_deposit_api(
+        letter_id: int,
+        payload: ChequeDepositIn,
+        db: DbSession,
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
+        _=Depends(has_permission("letter.update")),
+):
+    await _update_cheque_deposit(letter_id, payload, db, current_user)
+    return GenericResponse(message="Cheque deposit status updated successfully")

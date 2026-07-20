@@ -376,3 +376,19 @@ async def get_active_user_by_id(user_id: int, db: Session):
     if user and user.is_active:
         return user
     return None
+
+
+async def get_system_users_excluding_department_accounts(db: Session):
+    """Real people only — excludes department accounts. Used for the Assignees list."""
+    return db.query(SystemUser).filter(
+        SystemUser.is_active,
+        SystemUser.is_department_account == False
+    ).all()
+
+
+async def get_department_accounts(db: Session):
+    """Department accounts only. Used to show which departments have a login."""
+    return db.query(SystemUser).filter(
+        SystemUser.is_active,
+        SystemUser.is_department_account == True
+    ).all()

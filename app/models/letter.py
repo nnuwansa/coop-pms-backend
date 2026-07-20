@@ -171,10 +171,20 @@ class LetterModelOutOne(BaseModel):
     content: Optional[str] = None
     departments: list[IdNameModelOut] = []
     assignees: list[IdNameModelOut] = []
+    status_since: Optional[datetime] = None  # NEW
+    status_days: Optional[int] = None  # NEW
+    completion_file_name: Optional[str] = None  # NEW
+    cheque_deposited: bool = False
+    cheque_deposit_date: Optional[datetime] = None
+    cheque_account_no: Optional[str] = None
+    cheque_bank: Optional[str] = None
+    cheque_branch: Optional[str] = None
 
-    @field_validator('received_datetime', 'create_datetime', mode='after')
+    @field_validator('received_datetime', 'create_datetime', 'status_since', mode='after')
     @classmethod
     def ensure_timezone(cls, value):
+        if value is None:
+            return value
         return value.replace(tzinfo=timezone.utc)
 
 
@@ -189,6 +199,8 @@ class LetterModelOutList(BaseModel):
     organization: Optional[str]
     other: Optional[str]
     sender_subject_no: Optional[str] = None
+    status_since: Optional[datetime] = None  # NEW
+    status_days: Optional[int] = None  # NEW
 
     @field_validator('create_datetime', mode='after')
     @classmethod
@@ -218,3 +230,12 @@ class LetterAssignmentIn(BaseModel):
     status_id: Optional[int] = None
     department_ids: List[int] = []
     assignee_ids: List[int] = []
+    file_name: Optional[str] = None  # NEW
+
+
+class ChequeDepositIn(BaseModel):   # NEW
+    deposited: bool
+    deposit_date: Optional[datetime] = None
+    account_no: Optional[str] = None
+    bank: Optional[str] = None
+    branch: Optional[str] = None

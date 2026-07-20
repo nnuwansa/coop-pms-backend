@@ -3,18 +3,16 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from crud.system_user import save_system_user, get_system_user_by_id, update_system_user, \
-    delete_system_user, get_system_users, get_system_users_with_filter, system_user_stats
 from crud.system_user_history import save_user_history, get_user_history
 from db.models.models import SystemUser, Role, Department,Designation
-from exception.exception import NoDataFoundException
 from models.system_user import SystemUserModelIn, SystemUserModelOut, SystemUserModelUpdate, SystemUserModelNamesOut, \
     SystemUserFilter, SystemUserModelOutList, SystemUserHistoryOut
 from utils.security import hash_password
-
 from sqlalchemy.exc import IntegrityError
 from exception.exception import NoDataFoundException, ValidationException
-
+from crud.system_user import save_system_user, get_system_user_by_id, update_system_user, \
+    delete_system_user, get_system_users, get_system_users_with_filter, system_user_stats, \
+    get_system_users_excluding_department_accounts, get_department_accounts   # CHANGED
 
 
 logger = getLogger(__name__)
@@ -164,26 +162,6 @@ async def update_system_user_info(
     logger.info(f"Update system user {user_id} process ended")
     return user_response
 
-
-# async def delete_system_user_info(user_id: int, db: Session, performed_by: Optional[str] = None):
-#     logger.info(f"Hard delete system user {user_id} process started")
-#
-#     user_db = await get_system_user_by_id(user_id, db)
-#     if not user_db:
-#         raise NoDataFoundException(f"User {user_id} not found")
-#
-#     await save_user_history(
-#         user_id=user_db.id,
-#         action="Deleted",
-#         description=f"Account deleted for {user_db.email}",
-#         performed_by=performed_by,
-#         db=db
-#     )
-#
-#     await delete_system_user(user_db, db)
-#     logger.info(f"Hard delete system user {user_id} process ended")
-
-
 async def delete_system_user_info(user_id: int, db: Session, performed_by: Optional[str] = None):
     logger.info(f"Hard delete system user {user_id} process started")
 
@@ -256,3 +234,65 @@ async def get_user_history_service(user_id: int, db: Session):
 
     logger.info(f"Get history for system user {user_id} process ended")
     return history_response
+
+async def create_department_account(payload: "DepartmentAccountIn", db: Session, performed_by: Optional[str] = None):
+    logger.info("Create department account process started")
+
+    department = db.query(Department).filter(Department.id == payload.department_id, Department.is_active).first()
+    if not department:
+        raise NoDataFoundException(f"Department with ID {payload.department_id} not found")
+
+    hash_pwd = await hash_password(payload.password)
+    user = SystemUser(
+        email=payload.email,
+        password=hash_pwd,
+        first_name=department.name,
+        last_name="",
+        department_id=department.id,
+        role_id=None,
+        is_active=True,
+        is_department_account=True,
+    )
+    user_db = await save_system_user(user, db)
+
+    await save_user_history(
+        user_id=user_db.id,
+        action="Created",
+        description=f"Department account created for {department.name} ({payload.email})",
+        performed_by=performed_by,
+        db=db,
+    )
+
+    return SystemUserModelOut.model_validate(user_db)
+
+
+async def get_all_system_user_full_names_service(db: Session):
+    logger.info("Get all system user full names process started")
+
+    users = await get_system_users_excluding_department_accounts(db)   # CHANGED — was get_system_users(db)
+    user_full_names = [
+        SystemUserModelNamesOut(
+            id=user.id,
+            name=f"{user.first_name} {user.last_name}") for user in users
+    ]
+
+    logger.info("Get all system user full names process ended")
+    return user_full_names
+
+
+async def get_department_accounts_service(db: Session):   # NEW
+    logger.info("Get department accounts process started")
+
+    users = await get_department_accounts(db)
+    result = [
+        {
+            "id": user.id,
+            "department_id": user.department_id,
+            "department_name": user.department.name if user.department else None,
+            "email": user.email,
+        }
+        for user in users
+    ]
+
+    logger.info("Get department accounts process ended")
+    return result
