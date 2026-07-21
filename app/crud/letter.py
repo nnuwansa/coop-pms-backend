@@ -232,14 +232,20 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
 async def get_last_letter_number(prefix: str, db: Session) -> int:
     """
     Returns the highest sequence number already used among codes starting
-    with `prefix` (e.g. "T202607" for year+month).
+    with `prefix`.
 
-    We deliberately use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT):
-    COUNT can fall out of sync with the "next number that should be used"
-    whenever a code is reused — e.g. `duplicate_letter` copies the original
-    letter's code verbatim, so two rows can share the same code without
-    increasing the distinct count — or when rows are deleted. MAX+1 always
-    gives a correct, strictly increasing next number regardless of gaps or
+    IMPORTANT: `prefix` must include the day (e.g. "T20260720"), not just
+    year+month. The code format is "T" + year + month + day + number, so
+    if the prefix stops before the day, `code[len(prefix):]` would include
+    the day digits glued onto the number (e.g. "20349" instead of "349"),
+    corrupting the sequence and duplicating the day in the next code.
+
+    We use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT): COUNT can
+    fall out of sync with the "next number that should be used" whenever a
+    code is reused -- e.g. `duplicate_letter` copies the original letter's
+    code verbatim, so two rows can share the same code without increasing
+    a distinct count -- or when rows are deleted. MAX+1 always gives a
+    correct, strictly increasing next number regardless of gaps or
     duplicates.
 
     `with_for_update()` locks the matching rows for the duration of the
