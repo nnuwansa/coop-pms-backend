@@ -232,13 +232,15 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
 async def get_last_letter_number(prefix: str, db: Session) -> int:
     """
     Returns the highest sequence number already used among codes starting
-    with `prefix`.
+    with `prefix`, where `prefix` is the "T + year + month" portion only
+    (e.g. "T202607").
 
-    IMPORTANT: `prefix` must include the day (e.g. "T20260720"), not just
-    year+month. The code format is "T" + year + month + day + number, so
-    if the prefix stops before the day, `code[len(prefix):]` would include
-    the day digits glued onto the number (e.g. "20349" instead of "349"),
-    corrupting the sequence and duplicating the day in the next code.
+    The code format is "T" + year + month + day(2 digits) + number, so
+    after `prefix` there are always exactly 2 more digits for the day
+    before the number starts. We skip those 2 digits explicitly, which
+    lets the sequence continue across days within the same month (e.g.
+    last code on the 20th was ...350, first code on the 21st becomes 351)
+    instead of resetting to 01 on a new day.
 
     We use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT): COUNT can
     fall out of sync with the "next number that should be used" whenever a
@@ -260,8 +262,10 @@ async def get_last_letter_number(prefix: str, db: Session) -> int:
     ).scalars().all()
 
     max_number = 0
+    # skip the prefix (year+month) AND the 2-digit day that always follows it
+    skip_len = len(prefix) + 2
     for code in rows:
-        suffix = code[len(prefix):]
+        suffix = code[skip_len:]
         if suffix.isdigit():
             max_number = max(max_number, int(suffix))
 

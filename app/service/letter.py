@@ -487,14 +487,15 @@ async def generate_letter_code(datetime_utc: datetime, db: Session) -> str:
     logger.info("Generate letter code process started")
 
     date_local = datetime_utc.astimezone(TIME_ZONE)
-    # Prefix includes the day, so the sequence number is scoped per day
-    # (matches the code format: T + year + month + day + number).
-    prefix = f"T{date_local.year}{date_local.month:02d}{date_local.day:02d}"
+    # Month-level prefix -- the sequence number continues across days
+    # within the same month, it does not reset when the day changes.
+    month_prefix = f"T{date_local.year}{date_local.month:02d}"
+    day_str = f"{date_local.day:02d}"
 
-    last_number = await get_last_letter_number(prefix, db)
+    last_number = await get_last_letter_number(month_prefix, db)
     number = last_number + 1
 
-    code = f"{prefix}{number:02d}"
+    code = f"{month_prefix}{day_str}{number:02d}"
     logger.info("Generate letter code process end")
     return code
 
