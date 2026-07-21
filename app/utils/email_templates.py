@@ -76,14 +76,14 @@ def letter_received_email(
 ) -> tuple[str, str]:
     """Returns (email_subject, html_body) for a 'letter received' notification."""
 
-    email_subject = f"ලිපිය ලැබී ඇත — {letter_code}"
+    email_subject = f"Letter Received Confirmation — {letter_code}"
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #1e293b;">ලිපිය ලැබීම තහවුරු කිරීම</h2>
-        <p>ගරු {organization_name},</p>
+        <h3 style="color: #1e293b;">ලිපිය ලැබීම තහවුරු කිරීම</h3>
+        <p>ගරු මහත්මයාණනි/මහත්මියනි,</p>
         <p>
-            <strong>{organization_name}</strong> වෙනුවෙන් යවන ලද ලිපිය අප පද්ධතියේ
+            <strong>{organization_name}</strong> විසින් අප වෙත එවන ලද ලිපිය
             ලැබී, ලේඛනගත කර ඇති බව මෙයින් තහවුරු කරමු.
         </p>
         <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
@@ -97,10 +97,16 @@ def letter_received_email(
             </tr>
         </table>
         <p>මෙම කරුණ සම්බන්ධයෙන් ඉදිරියේදී ඇතිවන සියලුම ලිපි ගනුදෙනුවලදී කරුණාකර ඉහත ලිපි කේතය සඳහන් කරන්න.</p>
-        <p style="margin-top: 24px; color: #64748b; font-size: 12px;">
-             This is an automated notification from the COOP Postal Management System.
-             Please do not reply directly to this email.
-         </p>
+
+        <p style="margin-top: 24px; margin-bottom: 4px;">
+            <strong>සමුපකාර සංවර්ධන දෙපාර්තමේන්තුව</strong><br/>
+            මහනුවර
+        </p>
+
+        <p style="margin-top: 16px; color: #64748b; font-size: 12px;">
+            This is an automated notification from the COOP Postal Management System.
+            Please do not reply directly to this email.
+        </p>
     </div>
     """
 
