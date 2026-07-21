@@ -28,10 +28,7 @@ def letter_received_email(
                 <td style="padding: 8px; border: 1px solid #e2e8f0; font-weight: bold; background: #f8fafc;">Subject</td>
                 <td style="padding: 8px; border: 1px solid #e2e8f0;">{subject}</td>
             </tr>
-            <tr>
-                <td style="padding: 8px; border: 1px solid #e2e8f0; font-weight: bold; background: #f8fafc;">System Added Date/Time</td>
-                <td style="padding: 8px; border: 1px solid #e2e8f0;">{received_datetime.strftime('%d %B %Y, %I:%M %p')}</td>
-            </tr>
+            
         </table>
         <p>Please quote the letter code above in any future correspondence regarding this matter.</p>
         <p style="margin-top: 24px; color: #64748b; font-size: 13px;">
