@@ -12,7 +12,7 @@ from config.config import ATTACHMENTS_URL, ATTACHMENTS_DIR, TIME_ZONE
 from config.constant import LETTERS_EXCEL_HEADERS
 from crud.letter import (save_letter, get_active_letter, update_letter, get_all_letter, code_exist,
                          update_letter_attribute, validate_attribute, letters_excel_data, get_letter_count,
-                         get_all_status_counts)
+                         get_all_status_counts, get_last_letter_number)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
                                SystemUser, Department, Status, History as HistoryModel)
 from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException
@@ -470,20 +470,31 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
     return output
 
 
+# async def generate_letter_code(datetime_utc: datetime, db: Session) -> str:
+#     logger.info("Generate letter code process started")
+#
+#     date_local = datetime_utc.astimezone(TIME_ZONE)
+#     year_utc = date_local.year
+#     month_utc = date_local.month
+#     prefix = f"T{year_utc}{month_utc:02d}"
+#     count = await get_letter_count(prefix, db)
+#     number = count + 1
+#
+#     code = f"T{date_local.year}{date_local.month:02d}{date_local.day:02d}{number:02d}"
+#     logger.info("Generate letter code process end")
+#     return code
 async def generate_letter_code(datetime_utc: datetime, db: Session) -> str:
     logger.info("Generate letter code process started")
 
     date_local = datetime_utc.astimezone(TIME_ZONE)
-    year_utc = date_local.year
-    month_utc = date_local.month
-    prefix = f"T{year_utc}{month_utc:02d}"
-    count = await get_letter_count(prefix, db)
-    number = count + 1
+    prefix = f"T{date_local.year}{date_local.month:02d}"
+
+    last_number = await get_last_letter_number(prefix, db)
+    number = last_number + 1
 
     code = f"T{date_local.year}{date_local.month:02d}{date_local.day:02d}{number:02d}"
     logger.info("Generate letter code process end")
     return code
-
 
 async def get_letter_stats(current_user: SystemUserWithPermissionsModelOut, db: Session):
     logger.info("Fetch letter status process started")

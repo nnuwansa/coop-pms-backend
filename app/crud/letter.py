@@ -228,3 +228,35 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
 
     result = db.execute(query)
     return result.all()
+
+async def get_last_letter_number(prefix: str, db: Session) -> int:
+    """
+    Returns the highest sequence number already used among codes starting
+    with `prefix` (e.g. "T202607" for year+month).
+
+    We deliberately use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT):
+    COUNT can fall out of sync with the "next number that should be used"
+    whenever a code is reused — e.g. `duplicate_letter` copies the original
+    letter's code verbatim, so two rows can share the same code without
+    increasing the distinct count — or when rows are deleted. MAX+1 always
+    gives a correct, strictly increasing next number regardless of gaps or
+    duplicates.
+
+    `with_for_update()` locks the matching rows for the duration of the
+    transaction, so two letters being created at (almost) the same moment
+    can't both compute the same "next number".
+    """
+    like_pattern = f"{prefix}%"
+    rows = db.execute(
+        select(Letter.code)
+        .where(Letter.code.like(like_pattern))
+        .with_for_update()
+    ).scalars().all()
+
+    max_number = 0
+    for code in rows:
+        suffix = code[len(prefix):]
+        if suffix.isdigit():
+            max_number = max(max_number, int(suffix))
+
+    return max_number
