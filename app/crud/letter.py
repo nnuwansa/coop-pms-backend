@@ -229,11 +229,65 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
     result = db.execute(query)
     return result.all()
 
+# async def get_last_letter_number(prefix: str, db: Session) -> int:
+#     """
+#     Returns the highest sequence number already used among codes starting
+#     with `prefix`, where `prefix` is the "T + year + month" portion only
+#     (e.g. "T202607").
+#
+#     The code format is "T" + year + month + day(2 digits) + number, so
+#     after `prefix` there are always exactly 2 more digits for the day
+#     before the number starts. We skip those 2 digits explicitly, which
+#     lets the sequence continue across days within the same month (e.g.
+#     last code on the 20th was ...350, first code on the 21st becomes 351)
+#     instead of resetting to 01 on a new day.
+#
+#     We use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT): COUNT can
+#     fall out of sync with the "next number that should be used" whenever a
+#     code is reused -- e.g. `duplicate_letter` copies the original letter's
+#     code verbatim, so two rows can share the same code without increasing
+#     a distinct count -- or when rows are deleted. MAX+1 always gives a
+#     correct, strictly increasing next number regardless of gaps or
+#     duplicates.
+#
+#     `with_for_update()` locks the matching rows for the duration of the
+#     transaction, so two letters being created at (almost) the same moment
+#     can't both compute the same "next number".
+#     """
+#     like_pattern = f"{prefix}%"
+#     rows = db.execute(
+#         select(Letter.code)
+#         .where(Letter.code.like(like_pattern))
+#         .with_for_update()
+#     ).scalars().all()
+#
+#     max_number = 0
+#     # skip the prefix (year+month) AND the 2-digit day that always follows it
+#     skip_len = len(prefix) + 2
+#     for code in rows:
+#         suffix = code[skip_len:]
+#         if suffix.isdigit():
+#             max_number = max(max_number, int(suffix))
+#
+#     return max_number
+
+
+
+
 async def get_last_letter_number(prefix: str, db: Session) -> int:
     """
-    Returns the highest sequence number already used among codes starting
-    with `prefix`, where `prefix` is the "T + year + month" portion only
-    (e.g. "T202607").
+    Returns the highest sequence number already used among ACTIVE codes
+    starting with `prefix`, where `prefix` is the "T + year + month"
+    portion only (e.g. "T202607").
+
+    IMPORTANT: only `is_active` letters are considered. Deleting a letter
+    sets `is_active = False` but keeps the row (and its code) in the
+    table -- if we counted those rows here, deleting the most recent
+    letter(s) would still "burn" their numbers, so the next generated
+    code would skip ahead (e.g. jump straight to ...368 instead of
+    reusing ...366) even though nothing with that number exists anymore.
+    Filtering to active rows means the next number always continues
+    right after the highest number still in use.
 
     The code format is "T" + year + month + day(2 digits) + number, so
     after `prefix` there are always exactly 2 more digits for the day
@@ -246,9 +300,8 @@ async def get_last_letter_number(prefix: str, db: Session) -> int:
     fall out of sync with the "next number that should be used" whenever a
     code is reused -- e.g. `duplicate_letter` copies the original letter's
     code verbatim, so two rows can share the same code without increasing
-    a distinct count -- or when rows are deleted. MAX+1 always gives a
-    correct, strictly increasing next number regardless of gaps or
-    duplicates.
+    a distinct count. MAX+1 always gives a correct, strictly increasing
+    next number regardless of gaps or duplicates.
 
     `with_for_update()` locks the matching rows for the duration of the
     transaction, so two letters being created at (almost) the same moment
@@ -257,7 +310,7 @@ async def get_last_letter_number(prefix: str, db: Session) -> int:
     like_pattern = f"{prefix}%"
     rows = db.execute(
         select(Letter.code)
-        .where(Letter.code.like(like_pattern))
+        .where(and_(Letter.code.like(like_pattern), Letter.is_active))
         .with_for_update()
     ).scalars().all()
 
