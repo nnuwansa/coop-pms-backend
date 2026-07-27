@@ -3,7 +3,7 @@ from logging import getLogger
 from sqlalchemy import exists, select, and_, or_, func
 from sqlalchemy.orm import Session
 
-from db.models.models import Letter, Status, SystemUser, Department,LetterAssignee,LetterDepartment
+from db.models.models import Letter, Status, SystemUser, Department, LetterAssignee, LetterDepartment
 from exception.exception import NoDataFoundException
 from models.letter import LetterFilter
 from models.system_user import SystemUserWithPermissionsModelOut
@@ -35,6 +35,7 @@ async def update_letter(letter: Letter, db: Session) -> Letter:
     db.refresh(letter)
     return letter
 
+
 async def get_all_letter(
         offset: int,
         limit: int,
@@ -47,18 +48,27 @@ async def get_all_letter(
     needs_dept_join = False
     needs_assignee_join = False
 
+    # Permission-based visibility is always enforced, even when filters.ids
+    # is set — an explicit ID list must never be able to bypass a user's
+    # department/self view scoping.
     if 'letter.view:department' in current_user.permissions:
         conditions.append(
             or_(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW — otherwise a letter Recommended To someone never shows up in their list, since they're deliberately not in the assignee list
             )
         )
         needs_dept_join = True
         needs_assignee_join = True
 
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(LetterAssignee.assignee_id == current_user.id)
+        conditions.append(
+            or_(
+                LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW — same reasoning as above
+            )
+        )
         needs_assignee_join = True
     elif 'letter.view:all' in current_user.permissions:
         if filters.department_id:
@@ -70,25 +80,34 @@ async def get_all_letter(
     else:
         return 0, []
 
-    if filters.id:
-        conditions.append(Letter.id == filters.id)
-    if filters.code:
-        conditions.append(Letter.code.ilike(f"%{filters.code}%"))
-    if filters.subject:
-        conditions.append(Letter.subject.ilike(f"%{filters.subject}%"))
-    if filters.status_id:
-        conditions.append(Letter.status_id == filters.status_id)
-    if filters.organization_id:
-        conditions.append(Letter.organization_id == filters.organization_id)
-    if filters.create_date_start and filters.create_date_end:
-        conditions.append(
-            Letter.received_datetime.between(
-                filters.create_date_start,
-                filters.create_date_end
+    # NEW — explicit ID selection (e.g. checkboxes ticked in the dashboard
+    # table). This takes priority over all other search filters below: it's
+    # an exact "give me these specific letters" request, so combining it
+    # with code/subject/status/org/date-range filters that weren't meant to
+    # apply to a manual selection would silently drop rows the user picked.
+    # Permission-based visibility conditions above still apply.
+    if filters.ids:
+        conditions.append(Letter.id.in_(filters.ids))
+    else:
+        if filters.id:
+            conditions.append(Letter.id == filters.id)
+        if filters.code:
+            conditions.append(Letter.code.ilike(f"%{filters.code}%"))
+        if filters.subject:
+            conditions.append(Letter.subject.ilike(f"%{filters.subject}%"))
+        if filters.status_id:
+            conditions.append(Letter.status_id == filters.status_id)
+        if filters.organization_id:
+            conditions.append(Letter.organization_id == filters.organization_id)
+        if filters.create_date_start and filters.create_date_end:
+            conditions.append(
+                Letter.received_datetime.between(
+                    filters.create_date_start,
+                    filters.create_date_end
+                )
             )
-        )
-    if filters.other:
-        conditions.append(Letter.other.ilike(f"%{filters.other}%"))
+        if filters.other:
+            conditions.append(Letter.other.ilike(f"%{filters.other}%"))
 
     # NOTE: select id + create_datetime together (not id alone) so that
     # ORDER BY create_datetime is valid alongside SELECT DISTINCT (Postgres
@@ -105,13 +124,14 @@ async def get_all_letter(
     )
     total = db.execute(total_stmt).scalar_one()
 
-    # Explicit, deterministic order: newest first, id as tiebreaker
-    id_stmt = (
-        id_query
-        .order_by(Letter.create_datetime.desc(), Letter.id.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    # Explicit, deterministic order: newest first, id as tiebreaker.
+    # NEW — when filters.ids is set, skip offset/limit entirely: the caller
+    # asked for exactly these IDs, so pagination shouldn't be able to cut
+    # any of them out (e.g. if the frontend's page_size guess ever drifts
+    # from len(ids)).
+    id_stmt = id_query.order_by(Letter.create_datetime.desc(), Letter.id.desc())
+    if not filters.ids:
+        id_stmt = id_stmt.offset(offset).limit(limit)
     ids_result = [row[0] for row in db.execute(id_stmt).all()]
 
     if not ids_result:
@@ -125,6 +145,7 @@ async def get_all_letter(
     )
 
     return total, letters
+
 
 async def validate_attribute(attribute: str, entity_id: int, db: Session):
     model_map = {
@@ -155,17 +176,26 @@ async def letters_excel_data(db, current_user, filters):
     needs_dept_join = False
     needs_assignee_join = False
 
+    # Permission-based visibility is always enforced, even when filters.ids
+    # is set — an explicit ID list must never be able to bypass a user's
+    # department/self view scoping.
     if 'letter.view:department' in current_user.permissions:
         conditions.append(
             or_(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW
             )
         )
         needs_dept_join = True
         needs_assignee_join = True
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(LetterAssignee.assignee_id == current_user.id)
+        conditions.append(
+            or_(
+                LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW
+            )
+        )
         needs_assignee_join = True
     elif 'letter.view:all' not in current_user.permissions:
         return []
@@ -177,14 +207,32 @@ async def letters_excel_data(db, current_user, filters):
         query = query.outerjoin(LetterAssignee, LetterAssignee.letter_id == Letter.id)
     query = query.filter(and_(*conditions)).distinct()
 
+    # NEW — explicit ID selection (e.g. checkboxes ticked in the dashboard
+    # table) takes priority over limit/date-range: it's an exact "export
+    # these specific letters" request. We return early here so a leftover
+    # `limit` (e.g. from the export dialog's "Number of Entries" dropdown)
+    # can never silently truncate a manual selection.
+    if filters.ids:
+        query = query.filter(Letter.id.in_(filters.ids))
+        query = query.order_by(Letter.received_datetime.asc(), Letter.id.asc())
+        return query.all()
+
     if filters.create_date_start:
         query = query.filter(Letter.received_datetime >= filters.create_date_start)
     if filters.create_date_end:
         query = query.filter(Letter.received_datetime <= filters.create_date_end)
+    # CHANGED — order_by() must come BEFORE limit()/offset() on this legacy
+    # Query API; calling it after raised:
+    #   sqlalchemy.exc.InvalidRequestError: Query.order_by() being called on
+    #   a Query which already has LIMIT or OFFSET applied.
+    # so it's now applied first, and the limit (if any) is applied after.
+    query = query.order_by(Letter.received_datetime.asc(), Letter.id.asc())
     if filters.limit:
         query = query.limit(filters.limit)
     rows = query.all()
     return rows
+
+
 async def get_letter_count(prefix: str, db: Session) -> int:
     result = db.execute(
         select(func.count(Letter.code.distinct()))
@@ -193,6 +241,7 @@ async def get_letter_count(prefix: str, db: Session) -> int:
     )
     count = result.scalar_one()
     return count
+
 
 async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut, db: Session):
     conditions = [Letter.is_active]
@@ -204,12 +253,18 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
             or_(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW
             )
         )
         needs_dept_join = True
         needs_assignee_join = True
     elif 'letter.view:self' in current_user.permissions:
-        conditions.append(LetterAssignee.assignee_id == current_user.id)
+        conditions.append(
+            or_(
+                LetterAssignee.assignee_id == current_user.id,
+                Letter.recommended_to_id == current_user.id,   # NEW
+            )
+        )
         needs_assignee_join = True
     elif 'letter.view:all' not in current_user.permissions:
         return []
@@ -228,50 +283,6 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
 
     result = db.execute(query)
     return result.all()
-
-# async def get_last_letter_number(prefix: str, db: Session) -> int:
-#     """
-#     Returns the highest sequence number already used among codes starting
-#     with `prefix`, where `prefix` is the "T + year + month" portion only
-#     (e.g. "T202607").
-#
-#     The code format is "T" + year + month + day(2 digits) + number, so
-#     after `prefix` there are always exactly 2 more digits for the day
-#     before the number starts. We skip those 2 digits explicitly, which
-#     lets the sequence continue across days within the same month (e.g.
-#     last code on the 20th was ...350, first code on the 21st becomes 351)
-#     instead of resetting to 01 on a new day.
-#
-#     We use MAX(suffix) instead of COUNT(*) / COUNT(DISTINCT): COUNT can
-#     fall out of sync with the "next number that should be used" whenever a
-#     code is reused -- e.g. `duplicate_letter` copies the original letter's
-#     code verbatim, so two rows can share the same code without increasing
-#     a distinct count -- or when rows are deleted. MAX+1 always gives a
-#     correct, strictly increasing next number regardless of gaps or
-#     duplicates.
-#
-#     `with_for_update()` locks the matching rows for the duration of the
-#     transaction, so two letters being created at (almost) the same moment
-#     can't both compute the same "next number".
-#     """
-#     like_pattern = f"{prefix}%"
-#     rows = db.execute(
-#         select(Letter.code)
-#         .where(Letter.code.like(like_pattern))
-#         .with_for_update()
-#     ).scalars().all()
-#
-#     max_number = 0
-#     # skip the prefix (year+month) AND the 2-digit day that always follows it
-#     skip_len = len(prefix) + 2
-#     for code in rows:
-#         suffix = code[skip_len:]
-#         if suffix.isdigit():
-#             max_number = max(max_number, int(suffix))
-#
-#     return max_number
-
-
 
 
 async def get_last_letter_number(prefix: str, db: Session) -> int:

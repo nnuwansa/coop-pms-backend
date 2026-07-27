@@ -13,7 +13,7 @@ logger = getLogger(__name__)
 async def create_status(status_model: StatusModelIn, db: Session):
     logger.info("Create status process started")
 
-    status = Status(name=status_model.name)
+    status = Status(name=status_model.name,requires_file_name=status_model.requires_file_name)
 
     status_db = await save_status(status, db)
     status_response = StatusModelOut.model_validate(status_db)

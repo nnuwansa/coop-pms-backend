@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 class LetterFilter(BaseModel):
     id: Optional[int] = None
+    ids: Optional[List[int]] = None  # NEW — explicit list of letter IDs (e.g. from a table's row-selection checkboxes). When set, this takes priority over id/code/subject/department_id/assignee_id/status_id/organization_id/date-range/other in get_all_letter — those are ignored rather than combined with it.
     code: Optional[str] = None
     subject: Optional[str] = None
     department_id: Optional[int] = None
@@ -171,6 +172,7 @@ class LetterModelOutOne(BaseModel):
     content: Optional[str] = None
     departments: list[IdNameModelOut] = []
     assignees: list[IdNameModelOut] = []
+    recommended_to: Optional[IdNameModelOut] = None  # NEW — separate from assignees; who this letter was recommended to, distinct from who it's assigned to
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
     completion_file_name: Optional[str] = None  # NEW
@@ -201,6 +203,7 @@ class LetterModelOutList(BaseModel):
     sender_subject_no: Optional[str] = None
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
+    completion_file_name: Optional[str] = None  # NEW — File Name, shown/exported when a status required and saved one
 
     @field_validator('create_datetime', mode='after')
     @classmethod
@@ -220,6 +223,7 @@ class SwitchLetterAttribute(BaseModel):
 
 
 class LetterExcelFilter(BaseModel):
+    ids: Optional[List[int]] = None  # NEW — explicit list of letter IDs (e.g. from a table's row-selection checkboxes). When set, this takes priority over limit/create_date_start/create_date_end in letters_excel_data — those are ignored rather than combined with it.
     limit: Optional[int] = None
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
@@ -231,6 +235,7 @@ class LetterAssignmentIn(BaseModel):
     department_ids: List[int] = []
     assignee_ids: List[int] = []
     file_name: Optional[str] = None  # NEW
+    recommended_to_id: Optional[int] = None  # NEW — who a "Recommendation" status letter is recommended to; kept separate from assignee_ids so it never overwrites the actual assignee list
 
 
 class ChequeDepositIn(BaseModel):   # NEW

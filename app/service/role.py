@@ -4,8 +4,12 @@ from logging import getLogger
 from sqlalchemy.orm import Session
 
 from crud.permission import count_permissions
-from crud.role import save_role, get_all_active_roles, get_role_by_id, update_role, update_role_permissions, \
-    get_users_by_role_id, assign_users_to_role, get_role_status_ids, update_role_status_permissions
+from crud.role import (
+    save_role, get_all_active_roles, get_role_by_id, update_role, update_role_permissions,
+    get_users_by_role_id, assign_users_to_role, get_role_status_ids, update_role_status_permissions,
+    get_role_assignable_department_ids, update_role_assignable_departments,   # NEW
+    get_role_assignable_role_ids, update_role_assignable_roles,               # NEW
+)
 from crud.system_user import get_all_system_users_basic
 from db.models.models import Role
 from exception.exception import NoDataFoundException
@@ -81,7 +85,10 @@ async def soft_delete_role_info(role_id: int, db: Session):
 
 
 async def update_role_permissions_service(
-        role_id: int, permission_ids: list[int], status_ids: list[int], db: Session   # NEW param
+        role_id: int, permission_ids: list[int], status_ids: list[int],
+        assignable_department_ids: list[int] = None,  # NEW
+        assignable_role_ids: list[int] = None,  # NEW
+        db: Session = None,
 ):
     logger.info(f"Update role permissions started for role ID {role_id}")
 
@@ -105,22 +112,32 @@ async def update_role_permissions_service(
         role_id, status_ids if has_change_status_permission else [], db
     )
 
+    # NEW — only keep assignable department/role restrictions if letter.assign is actually granted
+    has_assign_permission = any(p.code == "letter.assign" for p in role.permissions) if permission_ids else False
+    await update_role_assignable_departments(role_id,
+                                             (assignable_department_ids or []) if has_assign_permission else [], db)
+    await update_role_assignable_roles(role_id, (assignable_role_ids or []) if has_assign_permission else [], db)
+
+
     logger.info(f"Update role permissions end for role ID {role_id}")
 
 
-async def get_role_permissions(role_id: int, db: Session):   # CHANGED return shape
-    logger.info(f"Get role permissions started for role ID {role_id}")
-
+async def get_role_permissions(role_id: int, db: Session):
     role = await get_role_by_id(role_id, db)
     if not role:
         raise NoDataFoundException(f"Role with ID {role_id} not found")
 
     permission_ids = [permission.id for permission in role.permissions]
-    status_ids = await get_role_status_ids(role_id, db)   # NEW
+    status_ids = await get_role_status_ids(role_id, db)
+    assignable_department_ids = await get_role_assignable_department_ids(role_id, db)   # NEW
+    assignable_role_ids = await get_role_assignable_role_ids(role_id, db)               # NEW
 
-    logger.info(f"Get role permissions end for role ID {role_id}")
-    return RolePermissionsOut(permission_ids=permission_ids, status_ids=status_ids)   # CHANGED
-
+    return RolePermissionsOut(
+        permission_ids=permission_ids,
+        status_ids=status_ids,
+        assignable_department_ids=assignable_department_ids,   # NEW
+        assignable_role_ids=assignable_role_ids,                # NEW
+    )
 async def get_assignable_users_service(db: Session):
     logger.info("Fetching assignable users for role dialog")
 

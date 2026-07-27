@@ -46,6 +46,8 @@ async def create_access_token(
         expires_delta: timedelta,
         permissions: list[str],
         allowed_status_ids: list[int] | None = None,   # NEW
+        allowed_department_ids: list[int] | None = None,   # NEW
+        allowed_assignee_role_ids: list[int] | None = None,   # NEW
 ) -> str:
     """Create a JWT access token."""
 
@@ -57,6 +59,9 @@ async def create_access_token(
         "type": "access",
         "permissions": permissions,
         "allowed_status_ids": allowed_status_ids or [],   # NEW
+        "allowed_department_ids": allowed_department_ids or [],  # NEW
+        "allowed_assignee_role_ids": allowed_assignee_role_ids or [],  # NEW
+
     }
     encoded_jwt = jwt.encode(to_encode, ACCESS_SECRET_KEY, algorithm=ACCESS_TOKEN_ALGORITHM)
     return encoded_jwt

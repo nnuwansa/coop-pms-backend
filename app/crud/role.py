@@ -3,6 +3,7 @@ from logging import getLogger
 from sqlalchemy.orm import Session
 
 from db.models.models import Role, RolePermission, SystemUser, RoleStatusPermission
+from db.models.models import Role, RolePermission, SystemUser, RoleStatusPermission, RoleAssignableDepartment, RoleAssignableRole
 
 logger = getLogger(__name__)
 
@@ -72,4 +73,26 @@ async def assign_users_to_role(role_id: int, user_ids: list[int], db: Session):
             {SystemUser.role_id: role_id}, synchronize_session=False
         )
 
+    db.commit()
+
+async def get_role_assignable_department_ids(role_id: int, db: Session):
+    rows = db.query(RoleAssignableDepartment.department_id).filter(
+        RoleAssignableDepartment.role_id == role_id
+    ).all()
+    return [r[0] for r in rows]
+
+async def update_role_assignable_departments(role_id: int, department_ids: list[int], db: Session):
+    db.query(RoleAssignableDepartment).filter(RoleAssignableDepartment.role_id == role_id).delete()
+    db.add_all([RoleAssignableDepartment(role_id=role_id, department_id=did) for did in department_ids])
+    db.commit()
+
+async def get_role_assignable_role_ids(role_id: int, db: Session):
+    rows = db.query(RoleAssignableRole.assignable_role_id).filter(
+        RoleAssignableRole.role_id == role_id
+    ).all()
+    return [r[0] for r in rows]
+
+async def update_role_assignable_roles(role_id: int, assignable_role_ids: list[int], db: Session):
+    db.query(RoleAssignableRole).filter(RoleAssignableRole.role_id == role_id).delete()
+    db.add_all([RoleAssignableRole(role_id=role_id, assignable_role_id=rid) for rid in assignable_role_ids])
     db.commit()

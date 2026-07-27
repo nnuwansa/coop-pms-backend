@@ -58,6 +58,8 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         token_type: str = payload.get("type")
         allowed_status_ids = payload.get("allowed_status_ids", [])   # NEW
+        allowed_department_ids = payload.get("allowed_department_ids", [])  # NEW
+        allowed_assignee_role_ids = payload.get("allowed_assignee_role_ids", [])  # NEW
 
         if user_id is None or token_type != "access":
             raise UnauthorizedException("Invalid access token")
@@ -84,6 +86,8 @@ async def get_current_user(
         role=user.role.name if user.role else None,
         permissions=[permission.code for permission in user.role.permissions],
         allowed_status_ids=allowed_status_ids,   # NEW
+        allowed_department_ids=allowed_department_ids,  # NEW
+        allowed_assignee_role_ids=allowed_assignee_role_ids,  # NEW
     )
 
     return user_model

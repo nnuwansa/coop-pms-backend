@@ -21,10 +21,14 @@ class RoleModelOut(BaseModel):
 class RolePermissionUpdateRequest(BaseModel):
     permission_ids: List[int]
     status_ids: List[int] = []
+    assignable_department_ids: List[int] = []  # NEW
+    assignable_role_ids: List[int] = []
 
 class RolePermissionsOut(BaseModel):   # NEW — replaces the old bare List[int] response
     permission_ids: List[int]
     status_ids: List[int]
+    assignable_department_ids: List[int] = []  # NEW
+    assignable_role_ids: List[int] = []
 
 class AssignableUserOut(BaseModel):
     """A registered user, shown in the role dialogs' user picker."""

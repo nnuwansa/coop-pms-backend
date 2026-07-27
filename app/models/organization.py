@@ -27,6 +27,7 @@ class OrganizationModelIn(BaseModel):
     address: Optional[str] = None
     email: Optional[str] = None
     telephone: Optional[str] = None
+    fax_no: Optional[str] = None  # NEW
 
 class OrganizationModelOut(BaseModel):
     id: int
@@ -34,6 +35,7 @@ class OrganizationModelOut(BaseModel):
     address: Optional[str] = None
     email: Optional[str] = None
     telephone: Optional[str] = None
+    fax_no: Optional[str] = None  # NEW
     create_datetime: datetime
     update_datetime: datetime
 

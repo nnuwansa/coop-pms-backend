@@ -62,14 +62,14 @@ async def delete_role_endpoint(role_id: int, db: DbSession, _=Depends(has_permis
 
 
 @router.put("/{role_id}/permissions", response_model=GenericResponse)
-async def update_role_permissions_endpoint(
-        role_id: int,
-        payload: RolePermissionUpdateRequest,
-        db: DbSession,
-):
-    await update_role_permissions_service(role_id, payload.permission_ids, payload.status_ids, db)
+async def update_role_permissions_endpoint(role_id: int, payload: RolePermissionUpdateRequest, db: DbSession):
+    await update_role_permissions_service(
+        role_id, payload.permission_ids, payload.status_ids,
+        assignable_department_ids=payload.assignable_department_ids,   # NEW
+        assignable_role_ids=payload.assignable_role_ids,                # NEW
+        db=db,
+    )
     return GenericResponse(message="Permissions updated successfully")
-
 
 @router.get("/{role_id}/permissions", response_model=GenericResponse)
 async def get_role_permissions_endpoint(

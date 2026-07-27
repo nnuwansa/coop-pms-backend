@@ -39,4 +39,5 @@ LETTERS_EXCEL_HEADERS = [
     ("Received Date", "received_datetime"),
     ("Create Date", "create_datetime"),
     ("Update Date", "update_datetime"),
+    ("File Name", "completion_file_name"),
 ]

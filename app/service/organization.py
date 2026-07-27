@@ -11,38 +11,6 @@ from models.organization import OrganizationModelIn, OrganizationModelOut
 logger = getLogger(__name__)
 
 
-# async def create_organization(organization_model: OrganizationModelIn, db: Session):
-#     logger.info("Create organization process started")
-#
-#     organization = Organization(
-#         name=organization_model.name,
-#     )
-#
-#     organization_db = await save_organization(organization, db)
-#     organization_response = OrganizationModelOut.model_validate(organization_db)
-#
-#     logger.info("Create organization process ended")
-#     return organization_response
-
-
-from sqlalchemy import func
-
-# async def create_organization(organization_model: OrganizationModelIn, db: Session):
-#     logger.info("Create organization process started")
-#
-#     # ALL records (active + deleted) max ID ganna
-#     max_id = db.query(func.max(Organization.id)).scalar() or 0
-#
-#     organization = Organization(
-#         id=max_id + 1,
-#         name=organization_model.name,
-#     )
-#
-#     organization_db = await save_organization(organization, db)
-#     organization_response = OrganizationModelOut.model_validate(organization_db)
-#
-#     logger.info("Create organization process ended")
-#     return organization_response
 
 async def create_organization(organization_model: OrganizationModelIn, db: Session):
     organization = Organization(
@@ -50,6 +18,7 @@ async def create_organization(organization_model: OrganizationModelIn, db: Sessi
         address=organization_model.address,
         email=organization_model.email,
         telephone=organization_model.telephone,
+        fax_no=organization_model.fax_no,  # NEW
     )
     organization_db = await save_organization(organization, db)
     return OrganizationModelOut.model_validate(organization_db)

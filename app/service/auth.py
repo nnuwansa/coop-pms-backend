@@ -10,7 +10,7 @@ from crud.system_user import get_user_by_email, get_active_user_by_id
 from db.models.models import RefreshToken
 from exception.exception import UnauthorizedException
 from utils.security import verify_password, create_access_token, create_refresh_token
-from crud.role import get_role_status_ids
+from crud.role import get_role_status_ids,get_role_assignable_department_ids, get_role_assignable_role_ids
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,8 @@ async def generate_access_token(user_id: int, response: Response, db: Session):
     user = await get_active_user_by_id(user_id, db)
 
     allowed_status_ids = await get_role_status_ids(user.role_id, db) if user.role_id else []   # NEW
+    allowed_department_ids = await get_role_assignable_department_ids(user.role_id, db) if user.role_id else []  # NEW
+    allowed_assignee_role_ids = await get_role_assignable_role_ids(user.role_id, db) if user.role_id else []  # NEW
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = await create_access_token(
@@ -113,6 +115,8 @@ async def generate_access_token(user_id: int, response: Response, db: Session):
         expires_delta=access_token_expires,
         permissions=[permission.code for permission in user.role.permissions],
         allowed_status_ids=allowed_status_ids,   # NEW
+        allowed_department_ids=allowed_department_ids,  # NEW
+        allowed_assignee_role_ids=allowed_assignee_role_ids,  # NEW
     )
 
 
