@@ -392,3 +392,12 @@ async def get_department_accounts(db: Session):
         SystemUser.is_active,
         SystemUser.is_department_account == True
     ).all()
+
+
+async def get_department_accounts_by_ids(account_ids: list[int], db: Session):
+    if not account_ids:
+        return []
+    return db.query(SystemUser).filter(
+        SystemUser.id.in_(account_ids),
+        SystemUser.is_department_account
+    ).all()

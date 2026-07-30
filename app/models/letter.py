@@ -196,6 +196,7 @@ class LetterModelOutList(BaseModel):
     create_datetime: datetime
     subject: Optional[str]
     department: Optional[str]
+    department_account_ids: List[int] = []  # NEW
     status: Optional[str]
     assignee: Optional[str]
     organization: Optional[str]
@@ -232,7 +233,7 @@ class LetterExcelFilter(BaseModel):
 
 class LetterAssignmentIn(BaseModel):
     status_id: Optional[int] = None
-    department_ids: List[int] = []
+    department_ids: Optional[List[int]] = []
     assignee_ids: List[int] = []
     file_name: Optional[str] = None  # NEW
     recommended_to_id: Optional[int] = None  # NEW — who a "Recommendation" status letter is recommended to; kept separate from assignee_ids so it never overwrites the actual assignee list

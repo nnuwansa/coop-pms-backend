@@ -83,8 +83,10 @@ async def get_current_user(
         last_name=user.last_name,
         department=user.department.name if user.department else None,
         department_id=user.department.id if user.department else None,
+        department_unit_id=user.department_unit_id,  # NEW
+        is_department_account=user.is_department_account,  # NEW
         role=user.role.name if user.role else None,
-        permissions=[permission.code for permission in user.role.permissions],
+        permissions = [permission.code for permission in user.role.permissions] if user.role else [],
         allowed_status_ids=allowed_status_ids,   # NEW
         allowed_department_ids=allowed_department_ids,  # NEW
         allowed_assignee_role_ids=allowed_assignee_role_ids,  # NEW

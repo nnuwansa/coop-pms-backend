@@ -33,7 +33,7 @@ async def login_user(email: str, password: str, response: Response, db: Session)
     access_token = await create_access_token(
         subject=user.id,
         expires_delta=access_token_expires,
-        permissions=[permission.code for permission in user.role.permissions],
+        permissions=[permission.code for permission in user.role.permissions] if user.role else [],
         allowed_status_ids=allowed_status_ids,   # NEW
     )
 
@@ -113,7 +113,7 @@ async def generate_access_token(user_id: int, response: Response, db: Session):
     access_token = await create_access_token(
         subject=user_id,
         expires_delta=access_token_expires,
-        permissions=[permission.code for permission in user.role.permissions],
+        permissions=[permission.code for permission in user.role.permissions] if user.role else [],
         allowed_status_ids=allowed_status_ids,   # NEW
         allowed_department_ids=allowed_department_ids,  # NEW
         allowed_assignee_role_ids=allowed_assignee_role_ids,  # NEW

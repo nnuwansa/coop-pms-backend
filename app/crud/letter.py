@@ -48,15 +48,29 @@ async def get_all_letter(
     needs_dept_join = False
     needs_assignee_join = False
 
-    # Permission-based visibility is always enforced, even when filters.ids
-    # is set — an explicit ID list must never be able to bypass a user's
-    # department/self view scoping.
-    if 'letter.view:department' in current_user.permissions:
+    # NEW — department/unit accounts (is_department_account=True) have no
+    # role, so they carry no permissions. They see only letters routed to
+    # their own unit (or, if they're a plain department account with no
+    # unit, their department with no unit set) — this is checked before
+    # the permission-based branches so it applies regardless of role.
+    if getattr(current_user, "is_department_account", False):
+        if current_user.department_unit_id:
+            conditions.append(LetterDepartment.department_unit_id == current_user.department_unit_id)
+        else:
+            conditions.append(
+                and_(
+                    LetterDepartment.department_id == current_user.department_id,
+                    LetterDepartment.department_unit_id.is_(None)
+                )
+            )
+        needs_dept_join = True
+
+    elif 'letter.view:department' in current_user.permissions:
         conditions.append(
             or_(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
-                Letter.recommended_to_id == current_user.id,   # NEW — otherwise a letter Recommended To someone never shows up in their list, since they're deliberately not in the assignee list
+                Letter.recommended_to_id == current_user.id,
             )
         )
         needs_dept_join = True
@@ -66,7 +80,7 @@ async def get_all_letter(
         conditions.append(
             or_(
                 LetterAssignee.assignee_id == current_user.id,
-                Letter.recommended_to_id == current_user.id,   # NEW — same reasoning as above
+                Letter.recommended_to_id == current_user.id,
             )
         )
         needs_assignee_join = True

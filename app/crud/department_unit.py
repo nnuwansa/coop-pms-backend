@@ -27,3 +27,9 @@ async def update_department_unit(unit: DepartmentUnit, db: Session):
     db.commit()
     db.refresh(unit)
     return unit
+
+
+async def get_units_by_ids(unit_ids: list[int], db: Session):
+    if not unit_ids:
+        return []
+    return db.query(DepartmentUnit).filter(DepartmentUnit.id.in_(unit_ids)).all()
