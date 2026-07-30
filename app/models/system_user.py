@@ -97,6 +97,7 @@ class SystemUserModelOutList(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
     department_unit: Optional[str] = None
+    is_department_account: bool = False  # NEW
 
 
 class SystemUserHistoryOut(BaseModel):

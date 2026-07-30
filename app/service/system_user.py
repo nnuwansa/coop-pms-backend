@@ -220,6 +220,7 @@ async def get_list_users(filters: SystemUserFilter, page: int, page_size: int, d
         role=user.role.name if user.role else None,
         department=user.department.name if user.department else None,
         department_unit=user.department_unit.name if user.department_unit else None,  # NEW
+        is_department_account=user.is_department_account,  # NEW
         status='Active' if user.is_active else 'Inactive',
     ) for user in users]
     return total, user_response
