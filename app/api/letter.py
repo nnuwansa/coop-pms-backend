@@ -390,7 +390,7 @@ async def update_cheque_deposit_api(
         payload: ChequeDepositIn,
         db: DbSession,
         current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
-        _=Depends(has_permission("letter.update")),
+        _=Depends(has_permission("letter.cheque_update")),
 ):
     await _update_cheque_deposit(letter_id, payload, db, current_user)
     return GenericResponse(message="Cheque deposit status updated successfully")
