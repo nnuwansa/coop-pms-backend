@@ -16,11 +16,13 @@ from crud.letter import (save_letter, get_active_letter, update_letter, get_all_
                          get_all_status_counts, get_last_letter_number)
 from crud.system_user import get_department_accounts_by_ids  # NEW — resolves department-account ids to SystemUser rows carrying (department_id, department_unit_id)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
-                               SystemUser, Department, DepartmentUnit, Status, History as HistoryModel)
-from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException
+                               SystemUser, Department, DepartmentUnit, Status, History as HistoryModel,
+                               LetterAssigneeStatus)
+from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException, UnauthorizedException
 from models.history import HistoryModelOut
 from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne,
                             LetterModelOutList, RemarksModelOut, AttachmentModelOut, IdNameModelOut,
+                            LetterAssigneeStatusIn, LetterAssigneeStatusOut, AssigneeStatusBrief,
                             LetterExcelFilter)
 from models.system_user import SystemUserWithPermissionsModelOut
 from service.history import generate_history
@@ -30,6 +32,7 @@ from utils.email import send_email
 from utils.email_templates import letter_received_email
 from exception.exception import ValidationException
 from utils.email_templates import letter_received_email
+from crud.letter_assignee_status import get_assignee_statuses_by_letter, get_assignee_status, create_assignee_status, delete_assignee_status
 
 logger = getLogger(__name__)
 
@@ -40,6 +43,50 @@ def _status_days(status_since) -> Optional[int]:
         return None
     since = status_since if status_since.tzinfo else status_since.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - since).days
+
+
+def _days_pending(
+        received_datetime,
+        status_name: Optional[str],
+        status_since,
+        assignee_status_rows: Optional[List] = None,
+) -> Optional[int]:
+    """
+    Days since the letter was received. Keeps counting from the original
+    received_datetime — EXCEPT once the letter is considered "done", at
+    which point it freezes instead of climbing forever.
+
+    CHANGED — "done" now depends on assignee-level completion when the
+    letter HAS assignees: it only freezes once EVERY assignee's own status
+    is "Completed", freezing at the moment the LAST one completed (not the
+    letter's overall status, which per-assignee statuses don't keep in
+    sync). Letters with no assignees fall back to the old rule: frozen once
+    the letter's own overall status is "Completed".
+    """
+    if not received_datetime:
+        return None
+    received = received_datetime if received_datetime.tzinfo else received_datetime.replace(tzinfo=timezone.utc)
+
+    if assignee_status_rows:
+        all_completed = all(
+            (row.status.name == "Completed") if row.status else False
+            for row in assignee_status_rows
+        )
+        if all_completed:
+            completion_times = [
+                (row.status_since if row.status_since.tzinfo else row.status_since.replace(tzinfo=timezone.utc))
+                for row in assignee_status_rows if row.status_since
+            ]
+            end = max(completion_times) if completion_times else datetime.now(timezone.utc)
+        else:
+            end = datetime.now(timezone.utc)
+    else:
+        if status_name == "Completed" and status_since:
+            end = status_since if status_since.tzinfo else status_since.replace(tzinfo=timezone.utc)
+        else:
+            end = datetime.now(timezone.utc)
+
+    return (end - received).days
 
 
 def _department_label(ld: "LetterDepartment") -> str:
@@ -66,6 +113,22 @@ async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
 
     for assignee_id in (letter_model.assignee_ids or []):
         db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id))
+
+    # NEW — give every assignee attached at CREATION time their own
+    # per-assignee status row too. Previously this only happened inside
+    # update_letter_assignment for assignees added during a later edit
+    # (added = new_ids - old_ids), so a letter created with an assignee
+    # already on it (e.g. via the "Insert Letter" form) got a LetterAssignee
+    # row but no matching LetterAssigneeStatus row — the assignee showed up
+    # under "Assignees" but had nothing in "Assignee Statuses" and nothing
+    # to update.
+    for assignee_id in (letter_model.assignee_ids or []):
+        db.add(LetterAssigneeStatus(
+            letter_id=saved_letter.id,
+            assignee_id=assignee_id,
+            status_id=letter.status_id,
+            status_since=datetime.utcnow(),
+        ))
 
     # CHANGED — `department_ids` now carries department ACCOUNT ids
     # (system_user.id of an is_department_account=True row), not raw
@@ -158,6 +221,46 @@ async def get_letter_by_id(
             for remark in reversed(letter_db.remarks) if remark.is_active
         ]
 
+    # NEW — self-heal: any assignee currently on the letter (LetterAssignee)
+    # who doesn't yet have a matching LetterAssigneeStatus row gets one
+    # created here, defaulting to the letter's current overall status. This
+    # covers letters created before this feature existed, and any future
+    # gap where an assignee ends up without a status row — the panel will
+    # never silently show nothing for someone who is actually assigned.
+    existing_status_assignee_ids = {row.assignee_id for row in letter_db.assignee_statuses}
+    missing_rows = False
+    for la in letter_db.assignees:
+        if la.assignee_id not in existing_status_assignee_ids:
+            db.add(LetterAssigneeStatus(
+                letter_id=letter_id,
+                assignee_id=la.assignee_id,
+                status_id=letter_db.status_id,
+                status_since=letter_db.status_since or datetime.utcnow(),
+            ))
+            missing_rows = True
+    if missing_rows:
+        db.commit()
+
+    # CHANGED — moved above `letter_response` construction. This block
+    # was previously placed *after* letter_response was built while still
+    # being referenced inside it, which raised
+    #   NameError: name 'assignee_statuses_out' is not defined
+    # on every single call to get_letter_by_id.
+    assignee_status_rows = await get_assignee_statuses_by_letter(letter_id, db)
+    assignee_statuses_out = [
+        LetterAssigneeStatusOut(
+            assignee_id=row.assignee_id,
+            assignee_name=f"{row.assignee.first_name} {row.assignee.last_name}" if row.assignee else "Unknown",
+            status_id=row.status_id,
+            status_name=row.status.name if row.status else "Unknown",
+            file_name=row.file_name,
+            status_since=row.status_since,
+            status_days=_status_days(row.status_since),
+            can_edit=(current_user.id == row.assignee_id),  # only true for the logged-in user's own row
+        )
+        for row in assignee_status_rows
+    ]
+
     letter_response = LetterModelOutOne(
         id=letter_db.id,
         code=letter_db.code,
@@ -179,6 +282,7 @@ async def get_letter_by_id(
         status_id=letter_db.status_id,
         status_since=letter_db.status_since,
         status_days=_status_days(letter_db.status_since),
+        assignee_statuses=assignee_statuses_out,
         related_letters=related_letters,
         attachments=await _make_attachments(letter_db.attachments, letter_id),
         # CHANGED — id/name now come from the sub-unit if one was set on
@@ -204,6 +308,13 @@ async def get_letter_by_id(
                 name=f"{letter_db.recommended_to.first_name} {letter_db.recommended_to.last_name}"
             )
             if getattr(letter_db, "recommended_to", None) else None
+        ),
+        forwarded_to=(
+            IdNameModelOut(
+                id=letter_db.forwarded_to.id,
+                name=f"{letter_db.forwarded_to.first_name} {letter_db.forwarded_to.last_name}"
+            )
+            if getattr(letter_db, "forwarded_to", None) else None
         ),
         completion_file_name=letter_db.completion_file_name,
         cheque_deposited=letter_db.cheque_deposited or False,
@@ -335,6 +446,22 @@ async def get_list_letters(
 
     offset = (page - 1) * page_size
     total, letters_db = await get_all_letter(offset, page_size, filters, current_user, db)
+
+    # NEW — bulk-fetch per-assignee statuses for every letter on this page in
+    # ONE query instead of one query per letter (N+1), then group them by
+    # letter_id in Python for the loop below. We keep the raw rows (not just
+    # display strings) so _days_pending can check per-assignee completion,
+    # and so the structured AssigneeStatusBrief objects can carry each
+    # assignee's own file_name alongside their status.
+    letter_ids_on_page = [letter.id for letter in letters_db]
+    status_rows_by_letter: Dict[int, List] = {}
+    if letter_ids_on_page:
+        rows = db.query(LetterAssigneeStatus).filter(
+            LetterAssigneeStatus.letter_id.in_(letter_ids_on_page)
+        ).all()
+        for row in rows:
+            status_rows_by_letter.setdefault(row.letter_id, []).append(row)
+
     letters_response = [
         LetterModelOutList(
             id=letter.id,
@@ -344,6 +471,12 @@ async def get_list_letters(
             status=letter.status.name if letter.status else None,
             status_since=letter.status_since,
             status_days=_status_days(letter.status_since),
+            days_pending=_days_pending(
+                letter.received_datetime,
+                letter.status.name if letter.status else None,
+                letter.status_since,
+                status_rows_by_letter.get(letter.id, []),  # CHANGED — considers per-assignee completion
+            ),
             organization=letter.organization.name if letter.organization else None,
             # CHANGED — show the sub-unit name where one is set, not the
             # parent section name
@@ -353,9 +486,34 @@ async def get_list_letters(
                 f"{la.assignee.first_name} {la.assignee.last_name}"
                 for la in letter.assignees
             ]) if letter.assignees else None,
+            # NEW — actual ids, not just the display string, so the Quick
+            # Edit dialog on the dashboard can preselect who's already
+            # assigned instead of opening with an empty checklist every time.
+            assignee_ids=[la.assignee_id for la in letter.assignees],
             other=letter.other,
             sender_subject_no=letter.sender_subject_no,
+            forwarded_to=(
+                f"{letter.forwarded_to.first_name} {letter.forwarded_to.last_name}"
+                if getattr(letter, "forwarded_to", None) else None
+            ),
             completion_file_name=letter.completion_file_name,
+            cheque_deposited=letter.cheque_deposited or False,  # NEW
+            cheque_deposit_date=letter.cheque_deposit_date,  # NEW
+            cheque_account_no=letter.cheque_account_no,  # NEW
+            cheque_bank=letter.cheque_bank,  # NEW
+            cheque_branch=letter.cheque_branch,  # NEW
+            # CHANGED — structured objects instead of flat "Name: Status"
+            # strings, so the frontend can color each badge by its own
+            # status and show each assignee's own file_name in the File
+            # Name column.
+            assignee_statuses=[
+                AssigneeStatusBrief(
+                    assignee_name=f"{row.assignee.first_name} {row.assignee.last_name}" if row.assignee else "Unknown",
+                    status_name=row.status.name if row.status else "Unknown",
+                    file_name=row.file_name,
+                )
+                for row in status_rows_by_letter.get(letter.id, [])
+            ],
         )
         for letter in letters_db
     ]
@@ -541,6 +699,26 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
                 ]) if obj.assignees else None
             elif col_name == "attachments":
                 value = len(obj.attachments) if obj.attachments else 0
+            elif col_name == "cheque_details":
+                # NEW — combined single column instead of 5 separate ones
+                # (deposited / date / account / bank / branch). Only makes
+                # sense when there's a cheque number on the letter at all.
+                if not obj.other:
+                    value = None
+                elif not obj.cheque_deposited:
+                    value = "Not deposited"
+                else:
+                    parts = ["Deposited"]
+                    if obj.cheque_deposit_date:
+                        parts.append(obj.cheque_deposit_date.replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d"))
+                    if obj.cheque_bank:
+                        bank_part = obj.cheque_bank
+                        if obj.cheque_branch:
+                            bank_part += f" ({obj.cheque_branch})"
+                        parts.append(bank_part)
+                    if obj.cheque_account_no:
+                        parts.append(f"A/C {obj.cheque_account_no}")
+                    value = " · ".join(parts)
             elif col_name in ["received_datetime", "create_datetime", "update_datetime"]:
                 value = getattr(obj, col_name).replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d")
             else:
@@ -639,6 +817,8 @@ async def update_letter_assignment(
         can_assign: bool = True,
         file_name: Optional[str] = None,
         recommended_to_id: Optional[int] = None,
+        can_forward: bool = True,
+        forwarded_to_id: Optional[int] = None,
 ):
     logger.info("Update letter assignment process started")
 
@@ -740,13 +920,6 @@ async def update_letter_assignment(
 
     # ── Assignees ─────────────────────────────────────────────────────────────
     if can_assign:
-        if allowed_assignee_role_ids:
-            assignee_role_ids = {
-                u.role_id for u in db.query(SystemUser).filter(SystemUser.id.in_(assignee_ids)).all()
-            }
-            if assignee_role_ids - set(allowed_assignee_role_ids):
-                raise NoDataFoundException(
-                    "This role is not permitted to assign letters to one or more of the selected users")
         old_assignee_ids = {la.assignee_id for la in letter.assignees}
         new_assignee_ids = set(assignee_ids)
 
@@ -758,23 +931,35 @@ async def update_letter_assignment(
             for assignee_id in assignee_ids:
                 db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
 
+            # NEW — give each newly-added assignee their own status row, defaulting to the letter's current status
+            for a_id in added:
+                existing = await get_assignee_status(letter_id, a_id, db)
+                if not existing:
+                    from db.models.models import LetterAssigneeStatus
+                    db.add(LetterAssigneeStatus(
+                        letter_id=letter_id,
+                        assignee_id=a_id,
+                        status_id=letter.status_id,
+                        status_since=datetime.utcnow(),
+                    ))
+
+            # NEW — clean up status rows for assignees who were removed
+            for a_id in removed:
+                await delete_assignee_status(letter_id, a_id, db)
+
             for a_id in added:
                 user = db.query(SystemUser).filter(SystemUser.id == a_id).first()
                 if user:
                     db.add(HistoryModel(
                         description=f"Assignee added: {user.first_name} {user.last_name}",
-                        username=username,
-                        email=email,
-                        letter_id=letter_id
+                        username=username, email=email, letter_id=letter_id
                     ))
             for a_id in removed:
                 user = db.query(SystemUser).filter(SystemUser.id == a_id).first()
                 if user:
                     db.add(HistoryModel(
                         description=f"Assignee removed: {user.first_name} {user.last_name}",
-                        username=username,
-                        email=email,
-                        letter_id=letter_id
+                        username=username, email=email, letter_id=letter_id
                     ))
         else:
             db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
@@ -782,19 +967,60 @@ async def update_letter_assignment(
                 db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
 
     # ── Recommended To ───────────────────────────────────────────────────────
-    if can_assign and recommended_to_id is not None:
-        if allowed_assignee_role_ids:
+    # CHANGED — was `if can_assign and recommended_to_id is not None:`, which
+    # meant unchecking "Send to Recommendation" on the frontend (which sends
+    # an explicit `recommended_to_id: null`) could never actually clear the
+    # field, because `None` from an explicit null is indistinguishable from
+    # `None` as "not provided". The permission check now happens only when a
+    # real id is being set; clearing (None) always goes through.
+    if can_assign:
+        if recommended_to_id is not None and allowed_assignee_role_ids:
             target_user = db.query(SystemUser).filter(SystemUser.id == recommended_to_id).first()
             if target_user and target_user.role_id not in allowed_assignee_role_ids:
                 raise NoDataFoundException(
                     "This role is not permitted to recommend letters to this user")
 
         if letter.recommended_to_id != recommended_to_id:
-            new_target = db.query(SystemUser).filter(SystemUser.id == recommended_to_id).first()
+            new_target = db.query(SystemUser).filter(SystemUser.id == recommended_to_id).first() if recommended_to_id else None
+            old_target = db.query(SystemUser).filter(SystemUser.id == letter.recommended_to_id).first() if letter.recommended_to_id else None
             letter.recommended_to_id = recommended_to_id
             if new_target:
                 db.add(HistoryModel(
                     description=f"Recommended to: {new_target.first_name} {new_target.last_name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id,
+                ))
+            elif old_target:
+                db.add(HistoryModel(
+                    description=f"Recommendation to {old_target.first_name} {old_target.last_name} removed",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id,
+                ))
+
+    # ── Forwarded To ─────────────────────────────────────────────────────────
+    # NEW — entirely separate from Assignees AND from Recommended To: no
+    # status is required or changed by forwarding, and forwarding never
+    # touches who the letter is actually assigned to or recommended to.
+    # `Letter.forwarded_to_id` is also included in the visibility conditions
+    # in crud/letter.py, so the person a letter is forwarded to can actually
+    # see it in their letters list — not just in this letter's detail view.
+    if can_forward:
+        if letter.forwarded_to_id != forwarded_to_id:
+            new_target = db.query(SystemUser).filter(SystemUser.id == forwarded_to_id).first() if forwarded_to_id else None
+            old_target = db.query(SystemUser).filter(SystemUser.id == letter.forwarded_to_id).first() if letter.forwarded_to_id else None
+            letter.forwarded_to_id = forwarded_to_id
+            if new_target:
+                db.add(HistoryModel(
+                    description=f"Forwarded to: {new_target.first_name} {new_target.last_name}",
+                    username=username,
+                    email=email,
+                    letter_id=letter_id,
+                ))
+            elif old_target:
+                db.add(HistoryModel(
+                    description=f"Forward to {old_target.first_name} {old_target.last_name} removed",
                     username=username,
                     email=email,
                     letter_id=letter_id,
@@ -820,6 +1046,51 @@ async def update_cheque_deposit(letter_id: int, payload: "ChequeDepositIn", db: 
 
     db.add(HistoryModel(
         description=f"Cheque {'marked as deposited' if payload.deposited else 'deposit unmarked'}",
+        username=f"{current_user.first_name} {current_user.last_name}",
+        email=current_user.email,
+        letter_id=letter_id,
+    ))
+    db.commit()
+
+async def update_assignee_status(
+        letter_id: int,
+        assignee_id: int,
+        payload: LetterAssigneeStatusIn,
+        db: Session,
+        current_user,
+):
+    letter = await get_active_letter(letter_id, db)
+    if not letter:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    # NEW — only the assignee themselves may edit their own status entry
+    if current_user.id != assignee_id:
+        raise UnauthorizedException("You can only update your own assigned status")
+
+    row = await get_assignee_status(letter_id, assignee_id, db)
+    if not row:
+        raise NoDataFoundException("You are not assigned to this letter")
+
+    if getattr(current_user, "allowed_status_ids", None):
+        if payload.status_id not in current_user.allowed_status_ids:
+            raise NoDataFoundException("This role is not permitted to set letters to this status")
+
+    new_status = db.query(Status).filter(Status.id == payload.status_id, Status.is_active).first()
+    if not new_status:
+        raise NoDataFoundException("Status not found")
+
+    if new_status.requires_file_name:
+        if not payload.file_name or not payload.file_name.strip():
+            raise ValidationException(f"File Name is required when setting status to '{new_status.name}'")
+
+    old_status_name = row.status.name if row.status else "Unknown"
+    row.status_id = payload.status_id
+    row.file_name = payload.file_name.strip() if payload.file_name else None
+    if row.status_id != payload.status_id:
+        row.status_since = datetime.utcnow()
+
+    db.add(HistoryModel(
+        description=f"{current_user.first_name} {current_user.last_name}'s status changed from {old_status_name} to {new_status.name}",
         username=f"{current_user.first_name} {current_user.last_name}",
         email=current_user.email,
         letter_id=letter_id,

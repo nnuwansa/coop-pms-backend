@@ -17,6 +17,8 @@ class LetterFilter(BaseModel):
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
     other: Optional[str] = None
+    has_cheque: Optional[bool] = None  # NEW — when true, only letters with a Cheque/Money Order No. set (`other` not empty)
+    pending_only: Optional[bool] = None  # NEW — when true, exclude letters whose status is "Completed"
 
 
 class LetterModelIn(BaseModel):
@@ -147,7 +149,27 @@ class IdNameModelOut(BaseModel):
 
     class Config:
         from_attributes = True
+class LetterAssigneeStatusIn(BaseModel):   # NEW
+    status_id: int
+    file_name: Optional[str] = None
 
+
+class LetterAssigneeStatusOut(BaseModel):   # NEW
+    assignee_id: int
+    assignee_name: str
+    status_id: int
+    status_name: str
+    file_name: Optional[str] = None
+    status_since: Optional[datetime] = None
+    status_days: Optional[int] = None
+    can_edit: bool = False   # true only for the logged-in assignee's own row
+
+    @field_validator('status_since', mode='after')
+    @classmethod
+    def ensure_timezone(cls, value):
+        if value is None:
+            return value
+        return value.replace(tzinfo=timezone.utc)
 
 class LetterModelOutOne(BaseModel):
     id: int
@@ -173,6 +195,7 @@ class LetterModelOutOne(BaseModel):
     departments: list[IdNameModelOut] = []
     assignees: list[IdNameModelOut] = []
     recommended_to: Optional[IdNameModelOut] = None  # NEW — separate from assignees; who this letter was recommended to, distinct from who it's assigned to
+    forwarded_to: Optional[IdNameModelOut] = None  # NEW — separate from assignees and recommended_to; who this letter was forwarded to, with no status attached
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
     completion_file_name: Optional[str] = None  # NEW
@@ -181,6 +204,7 @@ class LetterModelOutOne(BaseModel):
     cheque_account_no: Optional[str] = None
     cheque_bank: Optional[str] = None
     cheque_branch: Optional[str] = None
+    assignee_statuses: List[LetterAssigneeStatusOut] = []
 
     @field_validator('received_datetime', 'create_datetime', 'status_since', mode='after')
     @classmethod
@@ -188,6 +212,12 @@ class LetterModelOutOne(BaseModel):
         if value is None:
             return value
         return value.replace(tzinfo=timezone.utc)
+
+
+class AssigneeStatusBrief(BaseModel):   # NEW — structured per-assignee status for the dashboard table
+    assignee_name: str
+    status_name: str
+    file_name: Optional[str] = None
 
 
 class LetterModelOutList(BaseModel):
@@ -199,16 +229,39 @@ class LetterModelOutList(BaseModel):
     department_account_ids: List[int] = []  # NEW
     status: Optional[str]
     assignee: Optional[str]
+    assignee_ids: List[int] = []  # NEW — actual assignee ids, needed so the Quick Edit dialog can preselect who's already assigned (the `assignee` field above is only a display string of names, not usable for checkboxes)
     organization: Optional[str]
     other: Optional[str]
     sender_subject_no: Optional[str] = None
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
     completion_file_name: Optional[str] = None  # NEW — File Name, shown/exported when a status required and saved one
+    forwarded_to: Optional[str] = None  # NEW — who this letter was forwarded to, for quick visibility on the list/dashboard
+    cheque_deposited: bool = False  # NEW
+    cheque_deposit_date: Optional[datetime] = None  # NEW
+    cheque_account_no: Optional[str] = None  # NEW
+    cheque_bank: Optional[str] = None  # NEW
+    cheque_branch: Optional[str] = None  # NEW
+    days_pending: Optional[int] = None  # NEW — days since received_datetime; freezes once ALL assignees are "Completed" (or, for letters with no assignees, once the letter's own status is "Completed")
+    # CHANGED — was List[str] of "Name: Status" text. Now structured objects
+    # so the frontend can color-code each badge by its own status_name
+    # instead of everything rendering in one flat purple color, and so the
+    # per-assignee file_name (set when a status like "Completed" required
+    # one) can be shown next to that assignee's name in the File Name
+    # column, instead of relying on the old single overall `completion_file_name`
+    # field which per-assignee statuses never populate.
+    assignee_statuses: List[AssigneeStatusBrief] = []
 
     @field_validator('create_datetime', mode='after')
     @classmethod
     def ensure_timezone(cls, value):
+        return value.replace(tzinfo=timezone.utc)
+
+    @field_validator('cheque_deposit_date', mode='after')
+    @classmethod
+    def ensure_timezone_cheque(cls, value):
+        if value is None:
+            return value
         return value.replace(tzinfo=timezone.utc)
 
 
@@ -237,6 +290,7 @@ class LetterAssignmentIn(BaseModel):
     assignee_ids: List[int] = []
     file_name: Optional[str] = None  # NEW
     recommended_to_id: Optional[int] = None  # NEW — who a "Recommendation" status letter is recommended to; kept separate from assignee_ids so it never overwrites the actual assignee list
+    forwarded_to_id: Optional[int] = None  # NEW — who this letter is forwarded to; independent of status, assignees, and recommended_to
 
 
 class ChequeDepositIn(BaseModel):   # NEW
@@ -245,3 +299,24 @@ class ChequeDepositIn(BaseModel):   # NEW
     account_no: Optional[str] = None
     bank: Optional[str] = None
     branch: Optional[str] = None
+
+    class LetterAssigneeStatusIn(BaseModel):  # NEW
+        status_id: int
+        file_name: Optional[str] = None
+
+    class LetterAssigneeStatusOut(BaseModel):  # NEW
+        assignee_id: int
+        assignee_name: str
+        status_id: int
+        status_name: str
+        file_name: Optional[str] = None
+        status_since: Optional[datetime] = None
+        status_days: Optional[int] = None
+        can_edit: bool = False  # true only for the logged-in assignee's own row
+
+        @field_validator('status_since', mode='after')
+        @classmethod
+        def ensure_timezone(cls, value):
+            if value is None:
+                return value
+            return value.replace(tzinfo=timezone.utc)

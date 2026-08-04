@@ -3,11 +3,11 @@ from logging import getLogger
 from sqlalchemy import exists, select, and_, or_, func
 from sqlalchemy.orm import Session
 
-from db.models.models import Letter, Status, SystemUser, Department, LetterAssignee, LetterDepartment
+from db.models.models import Letter, Status, SystemUser, Department, LetterAssignee, LetterDepartment, LetterAssigneeStatus
 from exception.exception import NoDataFoundException
 from models.letter import LetterFilter
 from models.system_user import SystemUserWithPermissionsModelOut
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, aliased
 
 logger = getLogger(__name__)
 
@@ -47,6 +47,7 @@ async def get_all_letter(
 
     needs_dept_join = False
     needs_assignee_join = False
+    needs_status_join = False  # NEW — for the pending_only filter, which needs to check Status.name
 
     # NEW — department/unit accounts (is_department_account=True) have no
     # role, so they carry no permissions. They see only letters routed to
@@ -71,6 +72,7 @@ async def get_all_letter(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,
+                Letter.forwarded_to_id == current_user.id,
             )
         )
         needs_dept_join = True
@@ -81,6 +83,7 @@ async def get_all_letter(
             or_(
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,
+                Letter.forwarded_to_id == current_user.id,
             )
         )
         needs_assignee_join = True
@@ -122,6 +125,37 @@ async def get_all_letter(
             )
         if filters.other:
             conditions.append(Letter.other.ilike(f"%{filters.other}%"))
+        # NEW — "Has Cheque/Money Order" filter: only letters where a
+        # cheque/money order number was actually recorded.
+        if filters.has_cheque:
+            conditions.append(and_(Letter.other.isnot(None), Letter.other != ''))
+        # CHANGED — "Pending only" filter now matches the same completion
+        # rule used for the days_pending badge: a letter with assignees
+        # counts as done only once EVERY assignee's own status is
+        # "Completed" (per-assignee LetterAssigneeStatus rows), not the
+        # letter's overall status column, which per-assignee statuses don't
+        # keep in sync. Letters with no assignees fall back to the old rule
+        # (checking the letter's own overall status).
+        if filters.pending_only:
+            AssigneeStatusTable = aliased(Status)  # avoid clashing with the outer Status join used for the letter-level fallback
+            not_completed_assignee_exists = exists(
+                select(LetterAssigneeStatus.id)
+                .join(AssigneeStatusTable, AssigneeStatusTable.id == LetterAssigneeStatus.status_id)
+                .where(
+                    LetterAssigneeStatus.letter_id == Letter.id,
+                    AssigneeStatusTable.name != 'Completed',
+                )
+            )
+            has_any_assignee_status = exists(
+                select(LetterAssigneeStatus.id).where(LetterAssigneeStatus.letter_id == Letter.id)
+            )
+            conditions.append(
+                or_(
+                    and_(has_any_assignee_status, not_completed_assignee_exists),
+                    and_(~has_any_assignee_status, or_(Letter.status_id.is_(None), Status.name != 'Completed')),
+                )
+            )
+            needs_status_join = True
 
     # NOTE: select id + create_datetime together (not id alone) so that
     # ORDER BY create_datetime is valid alongside SELECT DISTINCT (Postgres
@@ -131,6 +165,8 @@ async def get_all_letter(
         id_query = id_query.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
     if needs_assignee_join:
         id_query = id_query.outerjoin(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+    if needs_status_join:
+        id_query = id_query.outerjoin(Status, Status.id == Letter.status_id)
     id_query = id_query.where(and_(*conditions))
 
     total_stmt = select(func.count()).select_from(
@@ -199,6 +235,7 @@ async def letters_excel_data(db, current_user, filters):
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,   # NEW
+                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
             )
         )
         needs_dept_join = True
@@ -208,6 +245,7 @@ async def letters_excel_data(db, current_user, filters):
             or_(
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,   # NEW
+                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
             )
         )
         needs_assignee_join = True
@@ -268,6 +306,7 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,   # NEW
+                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
             )
         )
         needs_dept_join = True
@@ -277,6 +316,7 @@ async def get_all_status_counts(current_user: SystemUserWithPermissionsModelOut,
             or_(
                 LetterAssignee.assignee_id == current_user.id,
                 Letter.recommended_to_id == current_user.id,   # NEW
+                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
             )
         )
         needs_assignee_join = True
