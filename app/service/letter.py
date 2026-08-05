@@ -1,3 +1,4 @@
+
 import os
 from datetime import datetime, timezone
 from io import BytesIO
@@ -8,6 +9,7 @@ from fastapi import UploadFile
 from openpyxl.workbook import Workbook
 from openpyxl.styles import Font, Alignment  # NEW — for the report heading
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from config.config import ATTACHMENTS_URL, ATTACHMENTS_DIR, TIME_ZONE
 from config.constant import LETTERS_EXCEL_HEADERS
@@ -17,7 +19,7 @@ from crud.letter import (save_letter, get_active_letter, update_letter, get_all_
 from crud.system_user import get_department_accounts_by_ids  # NEW — resolves department-account ids to SystemUser rows carrying (department_id, department_unit_id)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
                                SystemUser, Department, DepartmentUnit, Status, History as HistoryModel,
-                               LetterAssigneeStatus)
+                               LetterAssigneeStatus, Remark)
 from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException, UnauthorizedException
 from models.history import HistoryModelOut
 from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne,
@@ -322,6 +324,7 @@ async def get_letter_by_id(
         cheque_account_no=letter_db.cheque_account_no,
         cheque_bank=letter_db.cheque_bank,
         cheque_branch=letter_db.cheque_branch,
+        remarks_count=sum(1 for r in letter_db.remarks if r.is_active),  # NEW
     )
 
     logger.info("Fetch letter process end")
@@ -462,6 +465,17 @@ async def get_list_letters(
         for row in rows:
             status_rows_by_letter.setdefault(row.letter_id, []).append(row)
 
+    # NEW — bulk remark counts (one query for the whole page), so the
+    # dashboard's Actions column can show a "N remarks" notify badge
+    # without an N+1 query per row.
+    remarks_count_by_letter: Dict[int, int] = {}
+    if letter_ids_on_page:
+        count_rows = db.query(Remark.letter_id, func.count(Remark.id)).filter(
+            Remark.letter_id.in_(letter_ids_on_page),
+            Remark.is_active == True,
+        ).group_by(Remark.letter_id).all()
+        remarks_count_by_letter = {letter_id: count for letter_id, count in count_rows}
+
     letters_response = [
         LetterModelOutList(
             id=letter.id,
@@ -514,6 +528,7 @@ async def get_list_letters(
                 )
                 for row in status_rows_by_letter.get(letter.id, [])
             ],
+            remarks_count=remarks_count_by_letter.get(letter.id, 0),  # NEW
         )
         for letter in letters_db
     ]

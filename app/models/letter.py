@@ -1,3 +1,4 @@
+
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -7,7 +8,7 @@ from pydantic import BaseModel, field_validator
 
 class LetterFilter(BaseModel):
     id: Optional[int] = None
-    ids: Optional[List[int]] = None  # NEW — explicit list of letter IDs (e.g. from a table's row-selection checkboxes). When set, this takes priority over id/code/subject/department_id/assignee_id/status_id/organization_id/date-range/other in get_all_letter — those are ignored rather than combined with it.
+    ids: Optional[List[int]] = None
     code: Optional[str] = None
     subject: Optional[str] = None
     department_id: Optional[int] = None
@@ -17,8 +18,11 @@ class LetterFilter(BaseModel):
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
     other: Optional[str] = None
-    has_cheque: Optional[bool] = None  # NEW — when true, only letters with a Cheque/Money Order No. set (`other` not empty)
-    pending_only: Optional[bool] = None  # NEW — when true, exclude letters whose status is "Completed"
+    has_cheque: Optional[bool] = None
+    pending_only: Optional[bool] = None
+    pending_days_min: Optional[int] = None
+    pending_days_max: Optional[int] = None
+    assignee_status_id: Optional[int] = None
 
 
 class LetterModelIn(BaseModel):
@@ -205,6 +209,7 @@ class LetterModelOutOne(BaseModel):
     cheque_bank: Optional[str] = None
     cheque_branch: Optional[str] = None
     assignee_statuses: List[LetterAssigneeStatusOut] = []
+    remarks_count: int = 0  # NEW — total active remark count, so the Remarks tab can show a badge without needing to switch tabs first
 
     @field_validator('received_datetime', 'create_datetime', 'status_since', mode='after')
     @classmethod
@@ -251,6 +256,7 @@ class LetterModelOutList(BaseModel):
     # column, instead of relying on the old single overall `completion_file_name`
     # field which per-assignee statuses never populate.
     assignee_statuses: List[AssigneeStatusBrief] = []
+    remarks_count: int = 0  # NEW — total active remark count, for a notify badge in the dashboard's Actions column
 
     @field_validator('create_datetime', mode='after')
     @classmethod

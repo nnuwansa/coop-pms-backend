@@ -1,4 +1,6 @@
+
 from logging import getLogger
+from datetime import datetime, timedelta
 
 from sqlalchemy import exists, select, and_, or_, func
 from sqlalchemy.orm import Session
@@ -156,6 +158,37 @@ async def get_all_letter(
                 )
             )
             needs_status_join = True
+
+            # NEW — days-pending range, e.g. "1-5 days pending". Since a
+            # pending letter's days_pending is simply (now - received_datetime)
+            # in whole days (see service/letter.py's _days_pending), we can
+            # express "days_pending between min and max" directly as a
+            # received_datetime window, without needing a raw day-diff
+            # expression in SQL:
+            #   days_pending >= min  <=>  received_datetime <= now - min days
+            #   days_pending <= max  <=>  received_datetime >= now - max days
+            if filters.pending_days_min is not None:
+                conditions.append(
+                    Letter.received_datetime <= (datetime.utcnow() - timedelta(days=filters.pending_days_min))
+                )
+            if filters.pending_days_max is not None:
+                conditions.append(
+                    Letter.received_datetime >= (datetime.utcnow() - timedelta(days=filters.pending_days_max))
+                )
+
+        # NEW — filter by an individual ASSIGNEE'S status rather than the
+        # letter's overall status (the dashboard no longer shows/relies on
+        # the overall status column). Matches any letter where at least one
+        # assignee currently has this status.
+        if filters.assignee_status_id:
+            conditions.append(
+                exists(
+                    select(LetterAssigneeStatus.id).where(
+                        LetterAssigneeStatus.letter_id == Letter.id,
+                        LetterAssigneeStatus.status_id == filters.assignee_status_id,
+                    )
+                )
+            )
 
     # NOTE: select id + create_datetime together (not id alone) so that
     # ORDER BY create_datetime is valid alongside SELECT DISTINCT (Postgres
