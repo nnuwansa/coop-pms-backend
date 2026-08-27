@@ -32,9 +32,15 @@ def add_exception_handler(app: FastAPI):
                             content={'success': False,
                                      'message': exc.message})
 
+    # @app.exception_handler(IntegrityError)
+    # async def handle_integrity_error(_: Request, exc: IntegrityError):
+    #     logger.exception(exc)
+    #     return JSONResponse(status_code=HTTP_400_BAD_REQUEST,
+    #                         content={'success': False,
+    #                                  'message': 'Unfortunately database operation is failed'})
     @app.exception_handler(IntegrityError)
     async def handle_integrity_error(_: Request, exc: IntegrityError):
-        logger.exception(exc)
+        logger.exception(exc)  # ← මේකෙන් actual error එකම already log වෙනවා!
         return JSONResponse(status_code=HTTP_400_BAD_REQUEST,
                             content={'success': False,
                                      'message': 'Unfortunately database operation is failed'})

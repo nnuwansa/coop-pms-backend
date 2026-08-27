@@ -1,4 +1,3 @@
-
 from datetime import datetime
 from typing import Optional
 
@@ -30,6 +29,13 @@ class SystemUserModelUpdate(BaseModel):
     role_id: Optional[int] = None
     is_active: Optional[bool]
     department_unit_id: Optional[int] = None  # NEW
+    is_default_initials_by: Optional[bool] = None  # NEW — the Initials By picker pre-selects whichever user has this set; setting it true on one user should be treated as exclusive (service layer clears it from everyone else)
+
+
+class SystemUserByPermissionOut(BaseModel):  # NEW — used by the Initials By picker
+    id: int
+    name: str
+    is_default: bool = False
 
 
 class SystemUserModelOut(BaseModel):

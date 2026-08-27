@@ -1,9 +1,9 @@
-
 import enum
 
 from sqlalchemy import (
     Column, Integer, String, ForeignKey, DateTime, Boolean, Text, func, Enum
 )
+from datetime import datetime
 from sqlalchemy.orm import relationship, declarative_base
 
 LETTER_DOT_ID = "letter.id"
@@ -46,7 +46,13 @@ class Letter(Base):
     cheque_branch = Column(String(150), nullable=True)  # NEW
     recommended_to_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)  # NEW — who this letter is recommended to, separate from assignees
     forwarded_to_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)  # NEW — who this letter was forwarded to. Separate from assignees AND from recommended_to: forwarding never needs a status change, and never removes/overwrites who the letter is actually assigned to or recommended to.
-
+    initials_by_user_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)  # NEW — who this letter's reply/report was initialled by (e.g. the administration officer), for the printed seal block
+    initials_by_notes = Column(Text, nullable=True)  # NEW — optional note attached to the Initials By selection
+    initials_by_pending_user_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)  # NEW — who admin selected, awaiting THEIR confirmation
+    order_by_role_id = Column(Integer, ForeignKey("order_by_option.id"), nullable=True)
+    order_by_action_id = Column(Integer, ForeignKey("order_by_option.id"), nullable=True)
+    order_by_role = relationship("OrderByOption", foreign_keys=[order_by_role_id])
+    order_by_action = relationship("OrderByOption", foreign_keys=[order_by_action_id])
     # Relationships
     remarks = relationship("Remark", back_populates="letter")
     history = relationship("History")
@@ -60,7 +66,10 @@ class Letter(Base):
     departments = relationship("LetterDepartment", back_populates="letter")
     recommended_to = relationship("SystemUser", foreign_keys=[recommended_to_id])  # NEW
     forwarded_to = relationship("SystemUser", foreign_keys=[forwarded_to_id])  # NEW
+    initials_by = relationship("SystemUser", foreign_keys=[initials_by_user_id])  # NEW
+    initials_by_pending = relationship("SystemUser", foreign_keys=[initials_by_pending_user_id])  # NEW
     assignee_statuses = relationship("LetterAssigneeStatus", back_populates="letter")  # NEW
+    is_public_complaint = Column(Boolean, default=False)  # NEW
 
 class LetterRelation(Base):
     __tablename__ = "letter_relation"
@@ -153,6 +162,7 @@ class SystemUser(Base):
     is_department_account = Column(Boolean, default=False)
     department_unit_id = Column(Integer, ForeignKey("department_unit.id"), nullable=True)  # NEW
     department_unit = relationship("DepartmentUnit")  # NEW
+    is_default_initials_by = Column(Boolean, default=False)  # NEW — at most one user should have this true; the Initials By picker pre-selects them by default on a fresh letter, until an admin picks someone else for that letter
 
     role = relationship("Role")
     department = relationship("Department")
@@ -218,10 +228,11 @@ class LetterAssignee(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     letter_id = Column(Integer, ForeignKey("letter.id"))
     assignee_id = Column(Integer, ForeignKey("system_user.id"))
+    assigned_by_user_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)  # NEW — who added this assignee
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     letter = relationship("Letter", back_populates="assignees")
-    assignee = relationship("SystemUser")
-
+    assignee = relationship("SystemUser", foreign_keys=[assignee_id])  # <-- foreign_keys add කරන්න
+    assigned_by = relationship("SystemUser", foreign_keys=[assigned_by_user_id])
 
 class LetterDepartment(Base):
     __tablename__ = "letter_department"
@@ -243,6 +254,8 @@ class LetterAssigneeStatus(Base):   # NEW
     assignee_id = Column(Integer, ForeignKey("system_user.id"))
     status_id = Column(Integer, ForeignKey("status.id"))
     file_name = Column(String(255), nullable=True)
+    copies_forwarded_to = Column(Text, nullable=True)   # NEW — who copies of this assignee's response were sent to
+    summary = Column(Text, nullable=True)                # NEW — short summary of the reply/action taken, recorded alongside the status change
     status_since = Column(DateTime, default=func.utc_timestamp())
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
@@ -350,6 +363,8 @@ class Status(Base):
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     is_active = Column(Boolean, default=True)
     requires_file_name = Column(Boolean, default=False)  # NEW
+    requires_copies_forwarded_to = Column(Boolean, default=False)  # NEW — admin can require "Copies Forwarded To" when an assignee sets a letter to this status
+    requires_summary = Column(Boolean, default=False)  # NEW — admin can require a short Summary when an assignee sets a letter to this status
 
 
 class History(Base):
@@ -361,3 +376,57 @@ class History(Base):
     email = Column(String(255))
     letter_id = Column(Integer, ForeignKey(LETTER_DOT_ID))
     create_datetime = Column(DateTime, default=func.utc_timestamp())
+
+
+# ─── Letter Upload Collection ──────────────────────────────────────────────
+# NEW — lets someone with `letter.upload_collection` upload a letter file
+# into their own personal collection (e.g. a scanned copy received outside
+# the normal registration flow), without going through full letter
+# creation. Admins with `letter.upload_collection_view` can browse and
+# download everything uploaded by everyone.
+class LetterUpload(Base):
+    __tablename__ = "letter_upload"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uploaded_by_id = Column(Integer, ForeignKey("system_user.id"), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    file_name = Column(String(255), nullable=False)  # stored filename on disk
+    file_size = Column(Integer, nullable=True)
+    is_active = Column(Boolean, default=True)
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
+
+    uploaded_by = relationship("SystemUser")
+
+
+# ─── File Management ────────────────────────────────────────────────────────
+# NEW — file numbers pre-registered under a Section/Unit and Subject, each
+# optionally assigned to a specific person. This is what backs the File
+# Name picker on Assignee Status: an assignee only ever sees the files
+# assigned to them, instead of typing a free-text file name from memory.
+class ManagedFile(Base):
+    __tablename__ = "managed_file"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_number = Column(String(100), nullable=False, unique=True)
+    department_id = Column(Integer, ForeignKey("department.id"), nullable=False)
+    department_unit_id = Column(Integer, ForeignKey("department_unit.id"), nullable=True)
+    subject = Column(String(500), nullable=False)
+    assigned_to_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    create_datetime = Column(DateTime, default=func.utc_timestamp())
+
+    department = relationship("Department")
+    department_unit = relationship("DepartmentUnit")
+    assigned_to = relationship("SystemUser")
+
+
+class OrderByOption(Base):
+    __tablename__ = "order_by_option"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, unique=True)   # e.g. "සමූපකාර සංවර්ධන කොමසාරිස්..."
+    category = Column(String(20), nullable=False, default="action")  # NEW
+    is_active = Column(Boolean, default=True, nullable=False)
+    create_datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(255), nullable=True)   # who added it — helps tell "admin-added" vs "quick-add from letter view" apart if you ever want that distinction

@@ -1,5 +1,6 @@
 
 
+
 import logging
 from datetime import datetime
 from math import ceil
@@ -35,6 +36,9 @@ from service.letter import (
     generate_letter_code,
     get_letter_stats,
     duplicate_letter,
+    get_deleted_letters_service,
+    restore_letter_service,
+    permanently_delete_letter_service,
     update_letter_assignment as _update_assignment,
 )
 from service.remark import (
@@ -46,6 +50,9 @@ from models.letter import ChequeDepositIn
 from service.letter import update_cheque_deposit as _update_cheque_deposit
 from models.letter import LetterAssigneeStatusIn
 from service.letter import update_assignee_status as _update_assignee_status
+from service.letter import assign_initials_by as _assign_initials_by
+from service.letter import confirm_initials_by as _confirm_initials_by
+from service.letter import bulk_confirm_initials_by as _bulk_confirm
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +66,11 @@ router = APIRouter(
 @router.post("/", response_model=GenericResponse)
 async def create_letter_api(
         letter: LetterModelIn,
-        db: DbSession,
+        db: DbSession, current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
         _=Depends(has_permission("letter.create"))
 ):
     logger.debug(f"Request to create letter: {letter}")
-    letter_obj = await create_letter(letter, db)
+    letter_obj = await create_letter(letter, db, current_user_id=current_user.id)
     return GenericResponse(data=letter_obj, message="Letter created successfully")
 
 
@@ -231,7 +238,20 @@ async def update_attachments(
         data={"attachment_filenames": updated_filenames},
         message="Attachments updated successfully"
     )
+class BulkConfirmInitialsByIn(BaseModel):
+    letter_ids: List[int]
+    notes: Optional[str] = None
 
+
+@router.put("/initials-by/bulk-confirm", response_model=GenericResponse)
+async def bulk_confirm_initials_by_api(
+        payload: BulkConfirmInitialsByIn,
+        db: DbSession,
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
+):
+
+    result = await _bulk_confirm(payload.letter_ids, payload.notes, db, current_user)
+    return GenericResponse(message=f"Confirmed {len(result['confirmed'])} letter(s)", data=result)
 
 @router.patch("/{letter_id}/{attribute}",
               summary="Switch letter attribute (status, assignee, department)",
@@ -324,26 +344,10 @@ class LetterAssignmentIn(BaseModel):
     file_name: Optional[str] = None   # NEW
     recommended_to_id: Optional[int] = None  # NEW — separate from assignee_ids, see service/letter.py
     forwarded_to_id: Optional[int] = None  # NEW — separate from assignee_ids and recommended_to_id; no status required
-
-# @router.put("/assignment/{letter_id}", response_model=GenericResponse)
-# async def update_letter_assignment_api(
-#         letter_id: int,
-#         payload: LetterAssignmentIn,
-#         db: DbSession,
-#         current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
-#         _=Depends(has_permission("letter.update"))
-# ):
-#     await _update_assignment(
-#         letter_id,
-#         payload.status_id,
-#         payload.department_ids,
-#         payload.assignee_ids,
-#         db,
-#         username=f"{current_user.first_name} {current_user.last_name}",
-#         email=current_user.email,
-#         allowed_status_ids=current_user.allowed_status_ids,  # CHANGED — was role_id
-#     )
-#     return GenericResponse(message="Letter updated successfully")
+    initials_by_user_id: Optional[int] = None  # NEW — who initialled the reply
+    initials_by_notes: Optional[str] = None     # NEW
+    order_by_role_id: Optional[int] = None
+    order_by_action_id: Optional[int] = None
 
 @router.put("/assignment/{letter_id}", response_model=GenericResponse)
 async def update_letter_assignment_api(
@@ -352,7 +356,10 @@ async def update_letter_assignment_api(
         db: DbSession,
         current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
 ):
-    allowed = {'letter.change_status', 'letter.change_department', 'letter.assign', 'letter.forward'} & set(current_user.permissions)
+    allowed = {
+        'letter.change_status', 'letter.change_department', 'letter.assign', 'letter.forward',
+        'letter.initials_by', 'letter.order_by',   # NEW
+    } & set(current_user.permissions)
     if not allowed:
         raise UnauthorizedException('User does not have the required permission')
 
@@ -364,12 +371,20 @@ async def update_letter_assignment_api(
         can_change_status='letter.change_status' in current_user.permissions,
         can_change_department='letter.change_department' in current_user.permissions,
         can_assign='letter.assign' in current_user.permissions,
+        current_user_id=current_user.id,  # NEW
         file_name=payload.file_name,
         allowed_department_ids=current_user.allowed_department_ids,  # NEW
         allowed_assignee_role_ids=current_user.allowed_assignee_role_ids,  # NEW
         recommended_to_id=payload.recommended_to_id,  # NEW
         can_forward='letter.forward' in current_user.permissions,  # NEW
         forwarded_to_id=payload.forwarded_to_id,  # NEW
+        can_initials_by='letter.initials_by' in current_user.permissions,   # NEW
+        initials_by_user_id=payload.initials_by_user_id,                     # NEW
+        initials_by_notes=payload.initials_by_notes,                          # NEW
+        can_order_by='letter.order_by' in current_user.permissions,          # NEW
+        order_by_role_id=payload.order_by_role_id,
+        order_by_action_id = payload.order_by_action_id,
+        order_by_set_by_user_id = current_user.id,                            # NEW — always the actual logged-in user, never client-supplied
     )
     return GenericResponse(message="Letter updated successfully")
 
@@ -412,3 +427,87 @@ async def update_assignee_status_api(
     logger.debug(f"Request to update assignee status for letter {letter_id}")
     await _update_assignee_status(letter_id, current_user.id, payload, db, current_user)
     return GenericResponse(message="Your status has been updated successfully")
+
+
+
+# ADD THESE THREE ENDPOINTS TO api/letter.py.
+# IMPORTANT: place them ABOVE the existing
+#   @router.patch("/{letter_id}/{attribute}", ...)
+# route in the file (or anywhere before it) — both that route and
+# "/deleted/list" are two-segment paths, and keeping the specific static
+# path earlier avoids any ambiguity in how the router resolves them.
+#
+# Also make sure this import line is present near the top of api/letter.py:
+#   get_deleted_letters_service, restore_letter_service, permanently_delete_letter_service,
+# added to the "from service.letter import (...)" block.
+
+@router.get("/deleted/list", response_model=GenericResponsePaginated)
+async def get_deleted_letters_api(
+        db: DbSession,
+        page: int = 1,
+        page_size: int = 10,
+        _=Depends(has_permission("letter.view_deleted")),
+):
+    logger.debug("Request to list deleted letters")
+    total, result = await get_deleted_letters_service(page, page_size, db)
+    total_pages = ceil(total / page_size) if page_size else 1
+    return GenericResponsePaginated(
+        data=result, message="Deleted letters fetched successfully",
+        total=total, total_pages=total_pages, page=page, page_size=page_size,
+    )
+
+
+@router.put("/{letter_id}/restore", response_model=GenericResponse)
+async def restore_letter_api(
+        db: DbSession,
+        letter_id: int = Path(...),
+        _=Depends(has_permission("letter.view_deleted")),
+):
+    logger.debug(f"Request to restore letter {letter_id}")
+    await restore_letter_service(letter_id, db)
+    return GenericResponse(message="Letter restored successfully")
+
+
+@router.delete("/{letter_id}/permanent", response_model=GenericResponse)
+async def permanently_delete_letter_api(
+        db: DbSession,
+        letter_id: int = Path(...),
+        _=Depends(has_permission("letter.permanent_delete")),
+):
+    logger.debug(f"Request to permanently delete letter {letter_id}")
+    await permanently_delete_letter_service(letter_id, db)
+    return GenericResponse(message="Letter permanently deleted")
+
+
+class InitialsByAssignIn(BaseModel):
+    initials_by_pending_user_id: Optional[int] = None
+
+
+class InitialsByConfirmIn(BaseModel):
+    notes: Optional[str] = None
+
+
+
+@router.put("/{letter_id}/initials-by/confirm", response_model=GenericResponse)
+async def confirm_initials_by_api(
+        letter_id: int,
+        payload: InitialsByConfirmIn,
+        db: DbSession,
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
+):
+
+    await _confirm_initials_by(letter_id, payload.notes, db, current_user)
+    return GenericResponse(message="Initials confirmed")
+
+
+@router.put("/{letter_id}/initials-by/assign", response_model=GenericResponse)
+async def assign_initials_by_api(
+        letter_id: int,
+        payload: InitialsByAssignIn,
+        db: DbSession,
+        current_user: SystemUserWithPermissionsModelOut = Depends(get_current_user),
+        _=Depends(has_permission("letter.initials_by_manage")),
+):
+
+    await _assign_initials_by(letter_id, payload.initials_by_pending_user_id, db, current_user)
+    return GenericResponse(message="Initials By request sent")

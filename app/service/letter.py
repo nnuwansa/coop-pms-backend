@@ -19,13 +19,13 @@ from crud.letter import (save_letter, get_active_letter, update_letter, get_all_
 from crud.system_user import get_department_accounts_by_ids  # NEW — resolves department-account ids to SystemUser rows carrying (department_id, department_unit_id)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
                                SystemUser, Department, DepartmentUnit, Status, History as HistoryModel,
-                               LetterAssigneeStatus, Remark)
+                               LetterAssigneeStatus, Remark, Designation,OrderByOption)
 from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException, UnauthorizedException
 from models.history import HistoryModelOut
 from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne,
                             LetterModelOutList, RemarksModelOut, AttachmentModelOut, IdNameModelOut,
                             LetterAssigneeStatusIn, LetterAssigneeStatusOut, AssigneeStatusBrief,
-                            LetterExcelFilter)
+                            LetterExcelFilter, PersonWithDesignationOut)
 from models.system_user import SystemUserWithPermissionsModelOut
 from service.history import generate_history
 from utils.files import validate_files, save_attachment, delete_file, duplicate_file
@@ -104,17 +104,26 @@ def _department_label(ld: "LetterDepartment") -> str:
     return ld.department.name if ld.department else "Unknown"
 
 
-async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
+async def create_letter(letter_model: LetterModelIn, db: Session, current_user_id: Optional[int] = None) -> Dict:
     if await code_exist(letter_model.code, db):
         raise CodeExistException(f"Letter with code {letter_model.code} is already exist.")
 
-    letter_data = letter_model.model_dump(exclude={'assignee_ids', 'department_ids'})
+    letter_data = letter_model.model_dump(exclude={'assignee_ids', 'department_ids', 'initials_by_pending_user_id'})
     letter = Letter(**letter_data)
     letter.status_id = 1
+
+
+      # NEW — optional: admin can pick who the Initials By request should go
+      # to right at creation time, instead of it always being forced to the
+      # default candidate. If left blank, no request is sent — the admin can
+      # still send one later from the Letter View page.
+
+    if letter_model.initials_by_pending_user_id:
+              letter.initials_by_pending_user_id = letter_model.initials_by_pending_user_id
     saved_letter = await save_letter(letter, db)
 
     for assignee_id in (letter_model.assignee_ids or []):
-        db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id))
+        db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id, assigned_by_user_id=current_user_id))
 
     # NEW — give every assignee attached at CREATION time their own
     # per-assignee status row too. Previously this only happened inside
@@ -148,6 +157,39 @@ async def create_letter(letter_model: LetterModelIn, db: Session) -> Dict:
         ))
 
     db.commit()
+
+    # NEW — auto-send the Initials By confirmation request to whoever is
+    # flagged as the default candidate, right at letter creation. Saves the
+    # admin an extra manual step on Letter View for the common case; they
+    # can still change who it's sent to later from there if needed.
+    default_initials_user = db.query(SystemUser).filter(
+        SystemUser.is_default_initials_by == True,
+        SystemUser.is_active == True,
+    ).first()
+    if default_initials_user:
+        saved_letter.initials_by_pending_user_id = default_initials_user.id
+        db.add(HistoryModel(
+            description=f"Initials By requested from: {default_initials_user.first_name} {default_initials_user.last_name}",
+            username="System (auto-requested on letter creation)",
+            email="",
+            letter_id=saved_letter.id,
+        ))
+        db.commit()
+
+      # NEW — history entry so it's visible in the letter's audit trail that
+      # this was requested at creation time, not later from Letter View
+
+    if letter_model.initials_by_pending_user_id:
+               target = db.query(SystemUser).filter(SystemUser.id == letter_model.initials_by_pending_user_id).first()
+
+    if target:
+           db.add(HistoryModel(
+               description = f"Initials By requested from: {target.first_name} {target.last_name} (at creation)",
+               username = f"{current_user_id and 'System User' or 'System'}",
+               email = "",
+               letter_id = saved_letter.id,
+           ))
+           db.commit()
 
     # NEW — notify the organization by email that their letter was received,
     # if an organization is linked and has an email on file
@@ -249,6 +291,7 @@ async def get_letter_by_id(
     #   NameError: name 'assignee_statuses_out' is not defined
     # on every single call to get_letter_by_id.
     assignee_status_rows = await get_assignee_statuses_by_letter(letter_id, db)
+    assigned_by_map = {la.assignee_id: la.assigned_by for la in letter_db.assignees}
     assignee_statuses_out = [
         LetterAssigneeStatusOut(
             assignee_id=row.assignee_id,
@@ -256,9 +299,15 @@ async def get_letter_by_id(
             status_id=row.status_id,
             status_name=row.status.name if row.status else "Unknown",
             file_name=row.file_name,
+            copies_forwarded_to=row.copies_forwarded_to,   # NEW
+            summary=row.summary,                             # NEW
             status_since=row.status_since,
             status_days=_status_days(row.status_since),
             can_edit=(current_user.id == row.assignee_id),  # only true for the logged-in user's own row
+            assigned_by_name=(
+                f"{assigned_by_map[row.assignee_id].first_name} {assigned_by_map[row.assignee_id].last_name}"
+                if assigned_by_map.get(row.assignee_id) else None
+            ),
         )
         for row in assignee_status_rows
     ]
@@ -317,6 +366,39 @@ async def get_letter_by_id(
                 name=f"{letter_db.forwarded_to.first_name} {letter_db.forwarded_to.last_name}"
             )
             if getattr(letter_db, "forwarded_to", None) else None
+        ),
+        # NEW — Initials By / Order By: each carries the person's Designation
+        # (job title) too, since that's what actually gets printed under
+        # their name in the seal block (e.g. "(Administration Officer)").
+        initials_by=(
+            PersonWithDesignationOut(
+                id=letter_db.initials_by.id,
+                name=f"{letter_db.initials_by.first_name} {letter_db.initials_by.last_name}",
+                designation=letter_db.initials_by.designation.name if letter_db.initials_by.designation else None,
+            )
+            if getattr(letter_db, "initials_by", None) else None
+        ),
+        initials_by_notes=letter_db.initials_by_notes,
+        initials_by_pending=(
+                IdNameModelOut(
+                     id=letter_db.initials_by_pending.id,
+                     name=f"{letter_db.initials_by_pending.first_name} {letter_db.initials_by_pending.last_name}",
+               )
+               if getattr(letter_db, "initials_by_pending", None) else None
+        ),
+        order_by_role=(
+            IdNameModelOut(
+                id=letter_db.order_by_role.id,
+                name=letter_db.order_by_role.name,
+            )
+            if getattr(letter_db, "order_by_role", None) else None
+        ),
+        order_by_action=(
+            IdNameModelOut(
+                id=letter_db.order_by_action.id,
+                name=letter_db.order_by_action.name,
+            )
+            if getattr(letter_db, "order_by_action", None) else None
         ),
         completion_file_name=letter_db.completion_file_name,
         cheque_deposited=letter_db.cheque_deposited or False,
@@ -483,6 +565,7 @@ async def get_list_letters(
             create_datetime=letter.received_datetime,
             subject=letter.subject,
             status=letter.status.name if letter.status else None,
+            source=letter.source.name if letter.source else None,
             status_since=letter.status_since,
             status_days=_status_days(letter.status_since),
             days_pending=_days_pending(
@@ -525,10 +608,27 @@ async def get_list_letters(
                     assignee_name=f"{row.assignee.first_name} {row.assignee.last_name}" if row.assignee else "Unknown",
                     status_name=row.status.name if row.status else "Unknown",
                     file_name=row.file_name,
+                    copies_forwarded_to=row.copies_forwarded_to,   # NEW
+                    summary=row.summary,                             # NEW
                 )
                 for row in status_rows_by_letter.get(letter.id, [])
             ],
             remarks_count=remarks_count_by_letter.get(letter.id, 0),  # NEW
+            initials_by_pending = (
+                       IdNameModelOut(
+                               id=letter.initials_by_pending.id,
+                               name=f"{letter.initials_by_pending.first_name} {letter.initials_by_pending.last_name}",
+                       )
+                       if getattr(letter, "initials_by_pending", None) else None
+            ),
+            order_by_role = (
+                       IdNameModelOut(id=letter.order_by_role.id, name=letter.order_by_role.name)
+                       if getattr(letter, "order_by_role", None) else None
+            ),
+           order_by_action = (
+                     IdNameModelOut(id=letter.order_by_action.id, name=letter.order_by_action.name)
+                     if getattr(letter, "order_by_action", None) else None
+           ),
         )
         for letter in letters_db
     ]
@@ -736,6 +836,8 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
                     value = " · ".join(parts)
             elif col_name in ["received_datetime", "create_datetime", "update_datetime"]:
                 value = getattr(obj, col_name).replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d")
+            elif col_name == "is_public_complaint":
+                value = "Yes" if obj.is_public_complaint else "No"
             else:
                 value = getattr(obj, col_name)
             row_data.append(value)
@@ -830,10 +932,18 @@ async def update_letter_assignment(
         can_change_status: bool = True,
         can_change_department: bool = True,
         can_assign: bool = True,
+        current_user_id: Optional[int] = None,
         file_name: Optional[str] = None,
         recommended_to_id: Optional[int] = None,
         can_forward: bool = True,
         forwarded_to_id: Optional[int] = None,
+        can_initials_by: bool = False,
+        initials_by_user_id: Optional[int] = None,
+        initials_by_notes: Optional[str] = None,
+        can_order_by: bool = False,
+        order_by_role_id: Optional[int] = None,      # NEW — නි.කො / ස.කො
+        order_by_action_id: Optional[int] = None,    # NEW — කරු. ඉදිරි කටයුතු සඳහා, etc.
+        order_by_set_by_user_id: Optional[int] = None,
 ):
     logger.info("Update letter assignment process started")
 
@@ -942,9 +1052,19 @@ async def update_letter_assignment(
             added = new_assignee_ids - old_assignee_ids
             removed = old_assignee_ids - new_assignee_ids
 
+            # NEW — preserve who originally added each STILL-PRESENT assignee
+             # before we wipe and re-insert the rows below
+            existing_assigned_by = {la.assignee_id: la.assigned_by_user_id for la in letter.assignees}
+
             db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
             for assignee_id in assignee_ids:
-                db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
+                db.add(LetterAssignee(
+                      letter_id = letter_id,
+                      assignee_id = assignee_id,
+                  # NEW ones get the current user; ones that already existed keep their original assigner
+                      assigned_by_user_id = existing_assigned_by.get(assignee_id,
+                                                                                   current_user_id) if assignee_id not in added else current_user_id,
+                ))
 
             # NEW — give each newly-added assignee their own status row, defaulting to the letter's current status
             for a_id in added:
@@ -1041,6 +1161,65 @@ async def update_letter_assignment(
                     letter_id=letter_id,
                 ))
 
+
+    # ── Order By ─────────────────────────────────────────────────────────────
+    # CHANGED — Order By is now TWO independent selections that combine into
+    # one seal: a Role (නි.කො / ස.කො) and an Action (කරු. ඉදිරි කටයුතු සඳහා,
+    # etc), both drawn from the same OrderByOption table, distinguished by
+    # `category`. order_by_set_by_user_id is always the CURRENT user,
+    # supplied by the API layer from their token — never client-supplied.
+    if can_order_by:
+        changed = False
+
+        if letter.order_by_role_id != order_by_role_id:
+            new_role = db.query(OrderByOption).filter(
+                OrderByOption.id == order_by_role_id
+            ).first() if order_by_role_id else None
+            old_role = db.query(OrderByOption).filter(
+                OrderByOption.id == letter.order_by_role_id
+            ).first() if letter.order_by_role_id else None
+
+            letter.order_by_role_id = order_by_role_id
+            changed = True
+
+            if new_role:
+                db.add(HistoryModel(
+                    description=f"Order By role: {new_role.name}",
+                    username=username, email=email, letter_id=letter_id
+                ))
+            elif old_role:
+                db.add(HistoryModel(
+                    description=f"Order By role ({old_role.name}) removed",
+                    username=username, email=email, letter_id=letter_id
+                ))
+
+        if letter.order_by_action_id != order_by_action_id:
+            new_action = db.query(OrderByOption).filter(
+                OrderByOption.id == order_by_action_id
+            ).first() if order_by_action_id else None
+            old_action = db.query(OrderByOption).filter(
+                OrderByOption.id == letter.order_by_action_id
+            ).first() if letter.order_by_action_id else None
+
+            letter.order_by_action_id = order_by_action_id
+            changed = True
+
+            if new_action:
+                db.add(HistoryModel(
+                    description=f"Order By action: {new_action.name}",
+                    username=username, email=email, letter_id=letter_id
+                ))
+            elif old_action:
+                db.add(HistoryModel(
+                    description=f"Order By action ({old_action.name}) removed",
+                    username=username, email=email, letter_id=letter_id
+                ))
+
+        if changed:
+            letter.order_by_set_by_user_id = (
+                order_by_set_by_user_id if (order_by_role_id or order_by_action_id) else None
+            )
+
     db.commit()
     logger.info("Update letter assignment process ended")
 
@@ -1098,9 +1277,21 @@ async def update_assignee_status(
         if not payload.file_name or not payload.file_name.strip():
             raise ValidationException(f"File Name is required when setting status to '{new_status.name}'")
 
+    # NEW — same pattern as requires_file_name above, for the two new
+    # per-status admin-configurable requirements.
+    if new_status.requires_copies_forwarded_to:
+        if not payload.copies_forwarded_to or not payload.copies_forwarded_to.strip():
+            raise ValidationException(f"Copies Forwarded To is required when setting status to '{new_status.name}'")
+
+    if new_status.requires_summary:
+        if not payload.summary or not payload.summary.strip():
+            raise ValidationException(f"Summary is required when setting status to '{new_status.name}'")
+
     old_status_name = row.status.name if row.status else "Unknown"
     row.status_id = payload.status_id
     row.file_name = payload.file_name.strip() if payload.file_name else None
+    row.copies_forwarded_to = payload.copies_forwarded_to.strip() if payload.copies_forwarded_to else None   # NEW
+    row.summary = payload.summary.strip() if payload.summary else None                                       # NEW
     if row.status_id != payload.status_id:
         row.status_since = datetime.utcnow()
 
@@ -1111,3 +1302,185 @@ async def update_assignee_status(
         letter_id=letter_id,
     ))
     db.commit()
+
+# ── Deleted / Recycle Bin ────────────────────────────────────────────────
+
+async def get_deleted_letters_service(page: int, page_size: int, db: Session):
+    """List soft-deleted letters (is_active == False), paginated."""
+    logger.info("Fetch deleted letters process started")
+
+    offset = (page - 1) * page_size
+    query = db.query(Letter).filter(Letter.is_active == False)
+    total = query.count()
+    letters_db = (
+        query.order_by(Letter.update_datetime.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    letters_response = [
+        LetterModelOutList(
+            id=letter.id,
+            code=letter.code,
+            create_datetime=letter.received_datetime,
+            subject=letter.subject,
+            status=letter.status.name if letter.status else None,
+            source=letter.source.name if letter.source else None,
+            status_since=letter.status_since,
+            status_days=_status_days(letter.status_since),
+            days_pending=None,  # deleted letters — not relevant
+            organization=letter.organization.name if letter.organization else None,
+            department=", ".join(
+                [_department_label(ld) for ld in letter.departments]) if letter.departments else None,
+            department_account_ids=[],
+            assignee=", ".join([
+                f"{la.assignee.first_name} {la.assignee.last_name}"
+                for la in letter.assignees
+            ]) if letter.assignees else None,
+            assignee_ids=[la.assignee_id for la in letter.assignees],
+            other=letter.other,
+            sender_subject_no=letter.sender_subject_no,
+            forwarded_to=(
+                f"{letter.forwarded_to.first_name} {letter.forwarded_to.last_name}"
+                if getattr(letter, "forwarded_to", None) else None
+            ),
+            completion_file_name=letter.completion_file_name,
+            cheque_deposited=letter.cheque_deposited or False,
+            cheque_deposit_date=letter.cheque_deposit_date,
+            cheque_account_no=letter.cheque_account_no,
+            cheque_bank=letter.cheque_bank,
+            cheque_branch=letter.cheque_branch,
+            assignee_statuses=[],
+            remarks_count=sum(1 for r in letter.remarks if r.is_active) if letter.remarks else 0,
+        )
+        for letter in letters_db
+    ]
+
+    logger.info("Fetch deleted letters process end")
+    return total, letters_response
+
+async def restore_letter_service(letter_id: int, db: Session):
+    """Undo a soft delete — set is_active back to True."""
+    logger.info("Restore letter process started")
+
+    letter = db.query(Letter).filter(Letter.id == letter_id, Letter.is_active == False).first()
+    if not letter:
+        raise NoDataFoundException(f"Deleted letter with ID {letter_id} not found")
+
+    letter.is_active = True
+    db.add(HistoryModel(
+        description="Letter restored from recycle bin",
+        username="System",
+        email="",
+        letter_id=letter_id,
+    ))
+    db.commit()
+
+    logger.info("Restore letter process end")
+
+async def permanently_delete_letter_service(letter_id: int, db: Session):
+    """Hard delete — only allowed on letters that are already soft-deleted."""
+    logger.info("Permanent delete letter process started")
+
+    letter = db.query(Letter).filter(Letter.id == letter_id, Letter.is_active == False).first()
+    if not letter:
+        raise NoDataFoundException(f"Deleted letter with ID {letter_id} not found")
+
+    folder_path = os.path.join(ATTACHMENTS_DIR, f"letter_{letter_id}")
+    for attachment in letter.attachments:
+        delete_file(folder_path, attachment.file_name)
+
+    db.delete(letter)
+    db.commit()
+
+    logger.info("Permanent delete letter process end")
+
+
+
+async def assign_initials_by(letter_id: int, pending_user_id: Optional[int], db: Session, current_user) -> None:
+    """Admin/manager step — picks WHO should confirm, doesn't confirm anything itself."""
+    letter = await get_active_letter(letter_id, db)
+    if not letter:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    new_target = db.query(SystemUser).filter(SystemUser.id == pending_user_id).first() if pending_user_id else None
+    old_target = db.query(SystemUser).filter(SystemUser.id == letter.initials_by_pending_user_id).first() if letter.initials_by_pending_user_id else None
+
+    letter.initials_by_pending_user_id = pending_user_id
+    # NEW — reassigning to someone new clears any stale CONFIRMED value too,
+    # so the Letter View never shows an old confirmed name while a fresh
+    # confirmation request is outstanding to someone else.
+    if pending_user_id != letter.initials_by_user_id:
+        letter.initials_by_user_id = None
+        letter.initials_by_notes = None
+
+    if new_target:
+        db.add(HistoryModel(
+            description=f"Initials By requested from: {new_target.first_name} {new_target.last_name}",
+            username=f"{current_user.first_name} {current_user.last_name}",
+            email=current_user.email,
+            letter_id=letter_id,
+        ))
+    elif old_target:
+        db.add(HistoryModel(
+            description=f"Initials By request to {old_target.first_name} {old_target.last_name} cancelled",
+            username=f"{current_user.first_name} {current_user.last_name}",
+            email=current_user.email,
+            letter_id=letter_id,
+        ))
+    db.commit()
+
+
+async def confirm_initials_by(letter_id: int, notes: Optional[str], db: Session, current_user) -> None:
+    """The SELECTED candidate's own confirmation step — only they can call this for their own pending request."""
+    letter = await get_active_letter(letter_id, db)
+    if not letter:
+        raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    # NEW — only the person actually selected as pending may confirm.
+    # This is the enforcement point: even someone with letter.initials_by
+    # can't confirm a letter that wasn't sent to THEM specifically.
+    if letter.initials_by_pending_user_id != current_user.id:
+        raise UnauthorizedException("This letter's Initials By request was not sent to you")
+
+    letter.initials_by_user_id = current_user.id
+    letter.initials_by_notes = notes.strip() if notes else None
+    letter.initials_by_pending_user_id = None   # clears the pending flag once confirmed
+
+    db.add(HistoryModel(
+        description=f"Initials confirmed by: {current_user.first_name} {current_user.last_name}",
+        username=f"{current_user.first_name} {current_user.last_name}",
+        email=current_user.email,
+        letter_id=letter_id,
+    ))
+    db.commit()
+
+async def bulk_confirm_initials_by(letter_ids: List[int], notes: Optional[str], db: Session, current_user) -> Dict:
+    """
+    Confirms Initials By for every letter in letter_ids where the CURRENT
+    user is the one currently pending — letters not actually assigned to
+    them are silently skipped (not errored), so a mixed selection on the
+    dashboard doesn't block the whole batch.
+    """
+    confirmed_ids = []
+    skipped_ids = []
+
+    letters = db.query(Letter).filter(Letter.id.in_(letter_ids), Letter.is_active).all()
+    for letter in letters:
+        if letter.initials_by_pending_user_id != current_user.id:
+            skipped_ids.append(letter.id)
+            continue
+        letter.initials_by_user_id = current_user.id
+        letter.initials_by_notes = notes.strip() if notes else None
+        letter.initials_by_pending_user_id = None
+        db.add(HistoryModel(
+            description=f"Initials confirmed by: {current_user.first_name} {current_user.last_name}",
+            username=f"{current_user.first_name} {current_user.last_name}",
+            email=current_user.email,
+            letter_id=letter.id,
+        ))
+        confirmed_ids.append(letter.id)
+
+    db.commit()
+    return {"confirmed": confirmed_ids, "skipped": skipped_ids}

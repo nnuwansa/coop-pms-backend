@@ -40,4 +40,5 @@ LETTERS_EXCEL_HEADERS = [
     ("Create Date", "create_datetime"),
     ("Update Date", "update_datetime"),
     ("File Name", "completion_file_name"),
+    ("Public Complaint", "is_public_complaint"),
 ]

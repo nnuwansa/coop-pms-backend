@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -23,6 +22,7 @@ class LetterFilter(BaseModel):
     pending_days_min: Optional[int] = None
     pending_days_max: Optional[int] = None
     assignee_status_id: Optional[int] = None
+    is_public_complaint: Optional[bool] = None
 
 
 class LetterModelIn(BaseModel):
@@ -39,6 +39,8 @@ class LetterModelIn(BaseModel):
     organization_id: Optional[int] = None
     assignee_ids: Optional[List[int]] = []
     department_ids: Optional[List[int]] = []
+    is_public_complaint: bool = False  # NEW
+    initials_by_pending_user_id: Optional[int] = None
 
     @field_validator('sender', 'email', 'telephone', 'other', 'registered_post_no', mode='before')
     @classmethod
@@ -153,9 +155,22 @@ class IdNameModelOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PersonWithDesignationOut(BaseModel):   # NEW — used for Initials By / Order By
+    id: int
+    name: str
+    designation: Optional[str] = None   # the person's job title, e.g. "Administration Officer"
+
+    class Config:
+        from_attributes = True
+
+
 class LetterAssigneeStatusIn(BaseModel):   # NEW
     status_id: int
     file_name: Optional[str] = None
+    copies_forwarded_to: Optional[str] = None   # NEW — who copies of the reply were sent to
+    summary: Optional[str] = None                # NEW — short summary of the reply/action taken
 
 
 class LetterAssigneeStatusOut(BaseModel):   # NEW
@@ -164,9 +179,12 @@ class LetterAssigneeStatusOut(BaseModel):   # NEW
     status_id: int
     status_name: str
     file_name: Optional[str] = None
+    copies_forwarded_to: Optional[str] = None   # NEW
+    summary: Optional[str] = None                # NEW
     status_since: Optional[datetime] = None
     status_days: Optional[int] = None
     can_edit: bool = False   # true only for the logged-in assignee's own row
+    assigned_by_name: Optional[str] = None
 
     @field_validator('status_since', mode='after')
     @classmethod
@@ -200,6 +218,11 @@ class LetterModelOutOne(BaseModel):
     assignees: list[IdNameModelOut] = []
     recommended_to: Optional[IdNameModelOut] = None  # NEW — separate from assignees; who this letter was recommended to, distinct from who it's assigned to
     forwarded_to: Optional[IdNameModelOut] = None  # NEW — separate from assignees and recommended_to; who this letter was forwarded to, with no status attached
+    initials_by: Optional[PersonWithDesignationOut] = None    # NEW — who initialled the reply, for the printed seal block
+    initials_by_notes: Optional[str] = None
+    initials_by_pending: Optional[IdNameModelOut] = None
+    order_by_role: Optional[IdNameModelOut] = None  # NEW — නි.කො / ස.කො
+    order_by_action: Optional[IdNameModelOut] = None
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
     completion_file_name: Optional[str] = None  # NEW
@@ -210,6 +233,7 @@ class LetterModelOutOne(BaseModel):
     cheque_branch: Optional[str] = None
     assignee_statuses: List[LetterAssigneeStatusOut] = []
     remarks_count: int = 0  # NEW — total active remark count, so the Remarks tab can show a badge without needing to switch tabs first
+    is_public_complaint: bool = False  # NEW
 
     @field_validator('received_datetime', 'create_datetime', 'status_since', mode='after')
     @classmethod
@@ -223,6 +247,8 @@ class AssigneeStatusBrief(BaseModel):   # NEW — structured per-assignee status
     assignee_name: str
     status_name: str
     file_name: Optional[str] = None
+    copies_forwarded_to: Optional[str] = None   # NEW
+    summary: Optional[str] = None                # NEW
 
 
 class LetterModelOutList(BaseModel):
@@ -233,6 +259,7 @@ class LetterModelOutList(BaseModel):
     department: Optional[str]
     department_account_ids: List[int] = []  # NEW
     status: Optional[str]
+    source: Optional[str] = None
     assignee: Optional[str]
     assignee_ids: List[int] = []  # NEW — actual assignee ids, needed so the Quick Edit dialog can preselect who's already assigned (the `assignee` field above is only a display string of names, not usable for checkboxes)
     organization: Optional[str]
@@ -257,6 +284,11 @@ class LetterModelOutList(BaseModel):
     # field which per-assignee statuses never populate.
     assignee_statuses: List[AssigneeStatusBrief] = []
     remarks_count: int = 0  # NEW — total active remark count, for a notify badge in the dashboard's Actions column
+    is_public_complaint: bool = False  # NEW
+    initials_by_pending: Optional[
+        IdNameModelOut] = None  # NEW — who this letter is waiting on for initials confirmation
+    order_by_role: Optional[IdNameModelOut] = None  # NEW
+    order_by_action: Optional[IdNameModelOut] = None  # NEW
 
     @field_validator('create_datetime', mode='after')
     @classmethod
@@ -288,6 +320,7 @@ class LetterExcelFilter(BaseModel):
     create_date_start: Optional[datetime] = None
     create_date_end: Optional[datetime] = None
     columns: Optional[list[str]] = None
+    is_public_complaint: Optional[bool] = None  # NEW
 
 
 class LetterAssignmentIn(BaseModel):
@@ -297,6 +330,10 @@ class LetterAssignmentIn(BaseModel):
     file_name: Optional[str] = None  # NEW
     recommended_to_id: Optional[int] = None  # NEW — who a "Recommendation" status letter is recommended to; kept separate from assignee_ids so it never overwrites the actual assignee list
     forwarded_to_id: Optional[int] = None  # NEW — who this letter is forwarded to; independent of status, assignees, and recommended_to
+    initials_by_user_id: Optional[int] = None  # NEW — who initialled the reply (e.g. the administration officer)
+    initials_by_notes: Optional[str] = None     # NEW — optional note attached to that selection
+    order_by_role_id: Optional[int] = None  # NEW — නි.කො / ස.කො
+    order_by_action_id: Optional[int] = None
 
 
 class ChequeDepositIn(BaseModel):   # NEW
@@ -306,23 +343,32 @@ class ChequeDepositIn(BaseModel):   # NEW
     bank: Optional[str] = None
     branch: Optional[str] = None
 
-    class LetterAssigneeStatusIn(BaseModel):  # NEW
-        status_id: int
-        file_name: Optional[str] = None
+class LetterAssigneeStatusIn(BaseModel):  # NEW
+    status_id: int
+    file_name: Optional[str] = None
 
-    class LetterAssigneeStatusOut(BaseModel):  # NEW
-        assignee_id: int
-        assignee_name: str
-        status_id: int
-        status_name: str
-        file_name: Optional[str] = None
-        status_since: Optional[datetime] = None
-        status_days: Optional[int] = None
-        can_edit: bool = False  # true only for the logged-in assignee's own row
+class LetterAssigneeStatusOut(BaseModel):  # NEW
+    assignee_id: int
+    assignee_name: str
+    status_id: int
+    status_name: str
+    file_name: Optional[str] = None
+    status_since: Optional[datetime] = None
+    status_days: Optional[int] = None
+    can_edit: bool = False  # true only for the logged-in assignee's own row
+    assigned_by_name: Optional[str] = None  # NEW — who added this assignee to the letter
 
-        @field_validator('status_since', mode='after')
-        @classmethod
-        def ensure_timezone(cls, value):
-            if value is None:
-                return value
-            return value.replace(tzinfo=timezone.utc)
+    @field_validator('status_since', mode='after')
+    @classmethod
+    def ensure_timezone(cls, value):
+        if value is None:
+            return value
+        return value.replace(tzinfo=timezone.utc)
+
+
+class InitialsByAssignIn(BaseModel):   # NEW — admin selects the candidate
+    initials_by_pending_user_id: Optional[int] = None   # None clears the pending request
+
+
+class InitialsByConfirmIn(BaseModel):   # NEW — the selected candidate confirms
+    notes: Optional[str] = None

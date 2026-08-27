@@ -1,4 +1,3 @@
-
 from logging import getLogger
 from datetime import datetime, timedelta
 
@@ -118,19 +117,19 @@ async def get_all_letter(
             conditions.append(Letter.status_id == filters.status_id)
         if filters.organization_id:
             conditions.append(Letter.organization_id == filters.organization_id)
-        if filters.create_date_start and filters.create_date_end:
-            conditions.append(
-                Letter.received_datetime.between(
-                    filters.create_date_start,
-                    filters.create_date_end
-                )
-            )
+        if filters.create_date_start:
+            conditions.append(Letter.received_datetime >= filters.create_date_start)
+        if filters.create_date_end:
+            conditions.append(Letter.received_datetime <= filters.create_date_end)
         if filters.other:
             conditions.append(Letter.other.ilike(f"%{filters.other}%"))
         # NEW — "Has Cheque/Money Order" filter: only letters where a
         # cheque/money order number was actually recorded.
         if filters.has_cheque:
             conditions.append(and_(Letter.other.isnot(None), Letter.other != ''))
+        if filters.is_public_complaint is not None:
+               conditions.append(Letter.is_public_complaint == filters.is_public_complaint)
+
         # CHANGED — "Pending only" filter now matches the same completion
         # rule used for the days_pending badge: a letter with assignees
         # counts as done only once EVERY assignee's own status is
@@ -190,10 +189,15 @@ async def get_all_letter(
                 )
             )
 
-    # NOTE: select id + create_datetime together (not id alone) so that
-    # ORDER BY create_datetime is valid alongside SELECT DISTINCT (Postgres
+    # NOTE: select id + received_datetime together (not id alone) so that
+    # ORDER BY received_datetime is valid alongside SELECT DISTINCT (Postgres
     # requires ORDER BY expressions to appear in the select list when DISTINCT is used).
-    id_query = select(Letter.id, Letter.create_datetime).distinct()
+    # CHANGED — was Letter.create_datetime. Sorting by the DB row's actual
+    # insertion time meant a letter entered late for an old Received Date
+    # sorted as "newest" (since it was just inserted), instead of appearing
+    # in its correct place by Received Date. received_datetime is what the
+    # "Received Date" column actually shows, so that's what we sort by.
+    id_query = select(Letter.id, Letter.received_datetime).distinct()
     if needs_dept_join:
         id_query = id_query.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
     if needs_assignee_join:
@@ -207,12 +211,12 @@ async def get_all_letter(
     )
     total = db.execute(total_stmt).scalar_one()
 
-    # Explicit, deterministic order: newest first, id as tiebreaker.
+    # Explicit, deterministic order: newest RECEIVED first, id as tiebreaker.
     # NEW — when filters.ids is set, skip offset/limit entirely: the caller
     # asked for exactly these IDs, so pagination shouldn't be able to cut
     # any of them out (e.g. if the frontend's page_size guess ever drifts
     # from len(ids)).
-    id_stmt = id_query.order_by(Letter.create_datetime.desc(), Letter.id.desc())
+    id_stmt = id_query.order_by(Letter.received_datetime.desc(), Letter.id.desc())
     if not filters.ids:
         id_stmt = id_stmt.offset(offset).limit(limit)
     ids_result = [row[0] for row in db.execute(id_stmt).all()]
@@ -223,12 +227,11 @@ async def get_all_letter(
     letters = (
         db.query(Letter)
         .filter(Letter.id.in_(ids_result))
-        .order_by(Letter.create_datetime.desc())
+        .order_by(Letter.received_datetime.desc())  # CHANGED — was create_datetime
         .all()
     )
 
     return total, letters
-
 
 async def validate_attribute(attribute: str, entity_id: int, db: Session):
     model_map = {
@@ -306,6 +309,8 @@ async def letters_excel_data(db, current_user, filters):
         query = query.filter(Letter.received_datetime >= filters.create_date_start)
     if filters.create_date_end:
         query = query.filter(Letter.received_datetime <= filters.create_date_end)
+    if filters.is_public_complaint is not None:
+               query = query.filter(Letter.is_public_complaint == filters.is_public_complaint)
     # CHANGED — order_by() must come BEFORE limit()/offset() on this legacy
     # Query API; calling it after raised:
     #   sqlalchemy.exc.InvalidRequestError: Query.order_by() being called on
@@ -421,3 +426,70 @@ async def get_last_letter_number(prefix: str, db: Session) -> int:
             max_number = max(max_number, int(suffix))
 
     return max_number
+
+
+# ─── Deleted Letters (soft-delete collection) ──────────────────────────────
+# NEW — `Letter.is_active` was already used as the soft-delete flag
+# everywhere else in this file. These functions work with the
+# is_active=False rows specifically, so a deleted letter isn't just
+# invisible — it lands in its own reviewable collection that an admin can
+# restore from, or permanently purge from, instead of a delete being silent
+# and effectively irreversible from the UI's point of view.
+
+async def get_deleted_letters(offset: int, limit: int, db: Session):
+    """Paginated list of soft-deleted (is_active=False) letters, newest deletion first."""
+    base = select(Letter).where(Letter.is_active.is_(False))
+
+    total = db.execute(
+        select(func.count()).select_from(base.with_only_columns(Letter.id).subquery())
+    ).scalar_one()
+
+    stmt = base.order_by(Letter.update_datetime.desc()).offset(offset).limit(limit)
+    letters = db.execute(stmt).scalars().all()
+
+    return total, letters
+
+
+async def get_deleted_letter(letter_id: int, db: Session) -> Letter | None:
+    return db.query(Letter).filter(
+        Letter.id == letter_id, Letter.is_active.is_(False)
+    ).first()
+
+
+async def restore_deleted_letter(letter: Letter, db: Session) -> Letter:
+    letter.is_active = True
+    db.commit()
+    db.refresh(letter)
+    return letter
+
+
+async def permanently_delete_letter(letter_id: int, db: Session) -> None:
+    """
+    Actually removes a letter row and everything that references it.
+    Deletion order matters here: child rows referencing letter_id via a
+    foreign key must go first, or the delete would fail (or silently leave
+    orphaned rows, depending on the DB's FK enforcement settings).
+    """
+    from db.models.models import (
+        Remark, RemarkAttachment, RemarkHistory, LetterAttachment,
+        History, LetterRelation,
+    )
+
+    remark_ids = [r.id for r in db.query(Remark.id).filter(Remark.letter_id == letter_id).all()]
+    if remark_ids:
+        db.query(RemarkAttachment).filter(RemarkAttachment.remark_id.in_(remark_ids)).delete(synchronize_session=False)
+        db.query(RemarkHistory).filter(RemarkHistory.remark_id.in_(remark_ids)).delete(synchronize_session=False)
+    db.query(Remark).filter(Remark.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(RemarkHistory).filter(RemarkHistory.letter_id == letter_id).delete(synchronize_session=False)
+
+    db.query(LetterAttachment).filter(LetterAttachment.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(LetterDepartment).filter(LetterDepartment.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(LetterAssigneeStatus).filter(LetterAssigneeStatus.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(History).filter(History.letter_id == letter_id).delete(synchronize_session=False)
+    db.query(LetterRelation).filter(
+        or_(LetterRelation.letter_id == letter_id, LetterRelation.related_letter_id == letter_id)
+    ).delete(synchronize_session=False)
+
+    db.query(Letter).filter(Letter.id == letter_id).delete(synchronize_session=False)
+    db.commit()
