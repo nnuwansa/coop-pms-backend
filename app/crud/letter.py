@@ -227,7 +227,13 @@ async def get_all_letter(
     letters = (
         db.query(Letter)
         .filter(Letter.id.in_(ids_result))
-        .order_by(Letter.received_datetime.desc())  # CHANGED — was create_datetime
+        .order_by(Letter.received_datetime.desc(), Letter.id.desc())  # CHANGED — id tiebreak added,
+        # matching id_stmt above. Without this, rows sharing the same
+        # (or near-identical) received_datetime can come back from this
+        # second query in an unspecified order — a newly-inserted letter
+        # correctly selected into page 1 by id_stmt could still display
+        # BELOW older tied-timestamp letters, because this fetch query's
+        # own ORDER BY had no tiebreaker to keep it consistent with id_stmt.
         .all()
     )
 
