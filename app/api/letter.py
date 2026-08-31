@@ -348,6 +348,8 @@ class LetterAssignmentIn(BaseModel):
     initials_by_notes: Optional[str] = None     # NEW
     order_by_role_id: Optional[int] = None
     order_by_action_id: Optional[int] = None
+    subject: Optional[str] = None  # NEW
+    organization_id: Optional[int] = None  # NEW
 
 @router.put("/assignment/{letter_id}", response_model=GenericResponse)
 async def update_letter_assignment_api(
@@ -384,7 +386,11 @@ async def update_letter_assignment_api(
         can_order_by='letter.order_by' in current_user.permissions,          # NEW
         order_by_role_id=payload.order_by_role_id,
         order_by_action_id = payload.order_by_action_id,
-        order_by_set_by_user_id = current_user.id,                            # NEW — always the actual logged-in user, never client-supplied
+        order_by_set_by_user_id = current_user.id,
+        subject=payload.subject,  # NEW
+        can_update_details='letter.update' in current_user.permissions,  # NEW
+        organization_id=payload.organization_id,  # NEW
+
     )
     return GenericResponse(message="Letter updated successfully")
 

@@ -19,7 +19,7 @@ from crud.letter import (save_letter, get_active_letter, update_letter, get_all_
 from crud.system_user import get_department_accounts_by_ids  # NEW — resolves department-account ids to SystemUser rows carrying (department_id, department_unit_id)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
                                SystemUser, Department, DepartmentUnit, Status, History as HistoryModel,
-                               LetterAssigneeStatus, Remark, Designation,OrderByOption)
+                               LetterAssigneeStatus, Remark, Designation,Organization, OrderByOption)
 from exception.exception import NoDataFoundException, CodeExistException, LetterNotFoundException, UnauthorizedException
 from models.history import HistoryModelOut
 from models.letter import (LetterModelIn, LetterFilter, LetterModelOut, LetterModelOutOne,
@@ -944,12 +944,39 @@ async def update_letter_assignment(
         order_by_role_id: Optional[int] = None,      # NEW — නි.කො / ස.කො
         order_by_action_id: Optional[int] = None,    # NEW — කරු. ඉදිරි කටයුතු සඳහා, etc.
         order_by_set_by_user_id: Optional[int] = None,
+        subject: Optional[str] = None,              # NEW
+        can_update_details: bool = False,            # NEW
+        organization_id: Optional[int] = None,       # NEW
 ):
     logger.info("Update letter assignment process started")
 
     letter = await get_active_letter(letter_id, db)
+
     if not letter:
         raise NoDataFoundException(f"Letter with ID {letter_id} not found")
+
+    # ── Subject / Organization (Quick Edit) ─────────────────────────────────
+    # NEW — separate from the full letter update endpoint; only these two
+    # fields, gated by letter.update, same as the Quick Edit dialog's other
+    # fields are gated by their own specific permissions.
+    if can_update_details:
+        if subject is not None and subject != letter.subject:
+            letter.subject = subject
+            db.add(HistoryModel(
+                description="Subject/Content updated",
+                username=username, email=email, letter_id=letter_id
+            ))
+        if organization_id is not None and organization_id != letter.organization_id:
+            old_org = db.query(Organization).filter(Organization.id == letter.organization_id).first() if letter.organization_id else None
+            new_org = db.query(Organization).filter(Organization.id == organization_id).first()
+            letter.organization_id = organization_id
+            if new_org:
+                db.add(HistoryModel(
+                    description=f"Organization changed to: {new_org.name}",
+                    username=username, email=email, letter_id=letter_id
+                ))
+
+
 
     if can_change_status and status_id and status_id != letter.status_id:
         if allowed_status_ids:
