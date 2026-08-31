@@ -179,17 +179,21 @@ async def create_letter(letter_model: LetterModelIn, db: Session, current_user_i
       # NEW — history entry so it's visible in the letter's audit trail that
       # this was requested at creation time, not later from Letter View
 
+    target = None  # NEW — always define before the conditional block, so the
+    # later `if target:` check never crashes with
+    # UnboundLocalError when initials_by_pending_user_id wasn't provided
+
     if letter_model.initials_by_pending_user_id:
-               target = db.query(SystemUser).filter(SystemUser.id == letter_model.initials_by_pending_user_id).first()
+        target = db.query(SystemUser).filter(SystemUser.id == letter_model.initials_by_pending_user_id).first()
 
     if target:
-           db.add(HistoryModel(
-               description = f"Initials By requested from: {target.first_name} {target.last_name} (at creation)",
-               username = f"{current_user_id and 'System User' or 'System'}",
-               email = "",
-               letter_id = saved_letter.id,
-           ))
-           db.commit()
+        db.add(HistoryModel(
+            description=f"Initials By requested from: {target.first_name} {target.last_name} (at creation)",
+            username=f"{current_user_id and 'System User' or 'System'}",
+            email="",
+            letter_id=saved_letter.id,
+        ))
+        db.commit()
 
     # NEW — notify the organization by email that their letter was received,
     # if an organization is linked and has an email on file
