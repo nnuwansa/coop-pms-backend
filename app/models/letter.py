@@ -193,6 +193,8 @@ class LetterAssigneeStatusOut(BaseModel):   # NEW
             return value
         return value.replace(tzinfo=timezone.utc)
 
+
+
 class LetterModelOutOne(BaseModel):
     id: int
     code: str
@@ -347,23 +349,6 @@ class LetterAssigneeStatusIn(BaseModel):  # NEW
     status_id: int
     file_name: Optional[str] = None
 
-class LetterAssigneeStatusOut(BaseModel):  # NEW
-    assignee_id: int
-    assignee_name: str
-    status_id: int
-    status_name: str
-    file_name: Optional[str] = None
-    status_since: Optional[datetime] = None
-    status_days: Optional[int] = None
-    can_edit: bool = False  # true only for the logged-in assignee's own row
-    assigned_by_name: Optional[str] = None  # NEW — who added this assignee to the letter
-
-    @field_validator('status_since', mode='after')
-    @classmethod
-    def ensure_timezone(cls, value):
-        if value is None:
-            return value
-        return value.replace(tzinfo=timezone.utc)
 
 
 class InitialsByAssignIn(BaseModel):   # NEW — admin selects the candidate
