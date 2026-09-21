@@ -257,6 +257,7 @@ class LetterAssigneeStatus(Base):   # NEW
     copies_forwarded_to = Column(Text, nullable=True)   # NEW — who copies of this assignee's response were sent to
     summary = Column(Text, nullable=True)                # NEW — short summary of the reply/action taken, recorded alongside the status change
     status_since = Column(DateTime, default=func.utc_timestamp())
+    reminder_sent = Column(Boolean, default=False,nullable=False)  # NEW — prevents sending the 3-day reminder more than once per pending status
     create_datetime = Column(DateTime, default=func.utc_timestamp())
     update_datetime = Column(DateTime, default=func.utc_timestamp(), onupdate=func.utc_timestamp())
 

@@ -1325,6 +1325,7 @@ async def update_assignee_status(
     row.summary = payload.summary.strip() if payload.summary else None                                       # NEW
     if row.status_id != payload.status_id:
         row.status_since = datetime.utcnow()
+        row.reminder_sent = False  # NEW — reset so a fresh 3-day countdown can trigger a new reminder if this status also goes stale
 
     db.add(HistoryModel(
         description=f"{current_user.first_name} {current_user.last_name}'s status changed from {old_status_name} to {new_status.name}",
