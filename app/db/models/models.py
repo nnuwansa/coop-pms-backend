@@ -22,7 +22,7 @@ class Letter(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     code = Column(String(255), index=True, nullable=False)
     received_datetime = Column(DateTime, default=func.utc_timestamp())
-    subject = Column(String(255), nullable=False)
+    subject = Column(Text, nullable=False)  # CHANGED — was String(255); frontend now allows up to 3000 chars, which overflowed the old varchar(255) column and caused "Something went wrong" on insert/update
     other = Column(Text)
     content = Column(Text)
     sender = Column(String(255))
