@@ -345,11 +345,6 @@ class ChequeDepositIn(BaseModel):   # NEW
     bank: Optional[str] = None
     branch: Optional[str] = None
 
-class LetterAssigneeStatusIn(BaseModel):  # NEW
-    status_id: int
-    file_name: Optional[str] = None
-
-
 
 class InitialsByAssignIn(BaseModel):   # NEW — admin selects the candidate
     initials_by_pending_user_id: Optional[int] = None   # None clears the pending request
