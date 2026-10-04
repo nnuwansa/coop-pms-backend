@@ -1,6 +1,3 @@
-
-
-
 import logging
 from datetime import datetime
 from math import ceil
@@ -53,6 +50,7 @@ from service.letter import update_assignee_status as _update_assignee_status
 from service.letter import assign_initials_by as _assign_initials_by
 from service.letter import confirm_initials_by as _confirm_initials_by
 from service.letter import bulk_confirm_initials_by as _bulk_confirm
+from service.letter import get_letter_assignment_gap_counts as get_letter_assignment_gap_counts
 
 logger = logging.getLogger(__name__)
 
@@ -339,8 +337,8 @@ async def duplicate_letter_api(
 
 class LetterAssignmentIn(BaseModel):
     status_id: Optional[int] = None
-    department_ids: List[int] = []
-    assignee_ids: List[int] = []
+    department_ids: Optional[List[int]] = None   # CHANGED — None = not sent, leave untouched
+    assignee_ids: Optional[List[int]] = None     # CHANGED — None = not sent, leave untouched
     file_name: Optional[str] = None   # NEW
     recommended_to_id: Optional[int] = None  # NEW — separate from assignee_ids, see service/letter.py
     forwarded_to_id: Optional[int] = None  # NEW — separate from assignee_ids and recommended_to_id; no status required
@@ -390,6 +388,7 @@ async def update_letter_assignment_api(
         subject=payload.subject,  # NEW
         can_update_details='letter.update' in current_user.permissions,  # NEW
         organization_id=payload.organization_id,  # NEW
+        provided_fields=payload.model_fields_set,  # NEW — only touch fields the client really sent
 
     )
     return GenericResponse(message="Letter updated successfully")
@@ -517,3 +516,9 @@ async def assign_initials_by_api(
 
     await _assign_initials_by(letter_id, payload.initials_by_pending_user_id, db, current_user)
     return GenericResponse(message="Initials By request sent")
+
+
+@router.get("/assignment-gaps/", response_model=GenericResponse)   # CHANGED — trailing slash, otherwise GET "/{letter_id}" captures it and returns 422
+async def get_assignment_gaps_api(db: DbSession, current_user=Depends(get_current_user)):
+    result = await get_letter_assignment_gap_counts(current_user, db)
+    return GenericResponse(message="Assignment gap counts fetched", data=result)

@@ -1,7 +1,7 @@
 from logging import getLogger
 from datetime import datetime, timedelta
 
-from sqlalchemy import exists, select, and_, or_, func
+from sqlalchemy import exists, select, and_, or_, func, cast, Integer, desc
 from sqlalchemy.orm import Session
 
 from db.models.models import Letter, Status, SystemUser, Department, LetterAssignee, LetterDepartment, LetterAssigneeStatus
@@ -11,7 +11,17 @@ from models.system_user import SystemUserWithPermissionsModelOut
 from sqlalchemy.orm import joinedload, aliased
 
 logger = getLogger(__name__)
-
+def resolve_date_range(start, end):
+    """Single-day pick (end missing) = that one day; reversed range is swapped."""
+    if start and not end:
+        end = start + timedelta(days=1) - timedelta(milliseconds=1)
+    # NEW — picking the same day twice gives start == end (both midnight);
+    # treat that as the whole day instead of an empty zero-length range
+    if start and end and end == start:
+        end = start + timedelta(days=1) - timedelta(milliseconds=1)
+    if start and end and end < start:
+        start, end = end, start
+    return start, end
 
 async def save_letter(letter: Letter, db: Session) -> Letter:
     db.add(letter)
@@ -89,12 +99,7 @@ async def get_all_letter(
         )
         needs_assignee_join = True
     elif 'letter.view:all' in current_user.permissions:
-        if filters.department_id:
-            conditions.append(LetterDepartment.department_id == filters.department_id)
-            needs_dept_join = True
-        if filters.assignee_id:
-            conditions.append(LetterAssignee.assignee_id == filters.assignee_id)
-            needs_assignee_join = True
+        pass  # no visibility restriction; optional filters are applied below for every role
     else:
         return 0, []
 
@@ -117,10 +122,46 @@ async def get_all_letter(
             conditions.append(Letter.status_id == filters.status_id)
         if filters.organization_id:
             conditions.append(Letter.organization_id == filters.organization_id)
-        if filters.create_date_start:
-            conditions.append(Letter.received_datetime >= filters.create_date_start)
-        if filters.create_date_end:
-            conditions.append(Letter.received_datetime <= filters.create_date_end)
+        date_start, date_end = resolve_date_range(filters.create_date_start, filters.create_date_end)
+
+        if date_start:
+               conditions.append(Letter.received_datetime >= date_start)
+        if date_end:
+               conditions.append(Letter.received_datetime <= date_end)
+        # CHANGED — these sub-selects now use ALIASED tables + explicit
+        # .correlate(Letter). When the outer query already outer-joins
+        # LetterDepartment / LetterAssignee for the permission check (dept
+        # accounts, 'view:department', 'view:self' users), SQLAlchemy
+        # auto-correlated the plain table inside the EXISTS to the outer
+        # one, so the Section / Assignee filter silently matched the wrong
+        # rows (or errored). Aliases keep the sub-select independent.
+        if filters.department_id:
+            ld_f = aliased(LetterDepartment)
+            conditions.append(exists(
+                select(ld_f.id).where(
+                    ld_f.letter_id == Letter.id,
+                    ld_f.department_id == filters.department_id,
+                ).correlate(Letter)
+            ))
+        if filters.assignee_id:
+            la_f = aliased(LetterAssignee)
+            conditions.append(exists(
+                select(la_f.id).where(
+                    la_f.letter_id == Letter.id,
+                    la_f.assignee_id == filters.assignee_id,
+                ).correlate(Letter)
+            ))
+        # NEW — dashboard cards: letters with NO section / NO assignee yet
+        if filters.no_section:
+            ld_n = aliased(LetterDepartment)
+            conditions.append(~exists(
+                select(ld_n.id).where(ld_n.letter_id == Letter.id).correlate(Letter)
+            ))
+        if filters.no_assignee:
+            la_n = aliased(LetterAssignee)
+            conditions.append(~exists(
+                select(la_n.id).where(la_n.letter_id == Letter.id).correlate(Letter)
+            ))
         if filters.other:
             conditions.append(Letter.other.ilike(f"%{filters.other}%"))
         # NEW — "Has Cheque/Money Order" filter: only letters where a
@@ -197,7 +238,18 @@ async def get_all_letter(
     # sorted as "newest" (since it was just inserted), instead of appearing
     # in its correct place by Received Date. received_datetime is what the
     # "Received Date" column actually shows, so that's what we sort by.
-    id_query = select(Letter.id, Letter.received_datetime).distinct()
+    # CHANGED — the list is now ordered by the letter CODE (newest code
+    # first) instead of received_datetime. Code format is
+    # "T" + yyyy + mm + dd + running-number (number keeps counting through
+    # the month), so:
+    #   1) first 7 chars  = T + year + month  -> newest month first
+    #   2) length(code)   -> 99 < 100 (a longer number is a bigger number)
+    #   3) code itself    -> day, then number
+    # A letter inserted later therefore lands exactly at its own code's
+    # position, not at the top just because it was saved last.
+    code_month = func.substr(Letter.code, 1, 7).label("code_month")
+    code_len = func.length(Letter.code).label("code_len")
+    id_query = select(Letter.id, code_month, code_len, Letter.code).distinct()
     if needs_dept_join:
         id_query = id_query.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
     if needs_assignee_join:
@@ -216,7 +268,7 @@ async def get_all_letter(
     # asked for exactly these IDs, so pagination shouldn't be able to cut
     # any of them out (e.g. if the frontend's page_size guess ever drifts
     # from len(ids)).
-    id_stmt = id_query.order_by(Letter.received_datetime.desc(), Letter.id.desc())
+    id_stmt = id_query.order_by(code_month.desc(), code_len.desc(), Letter.code.desc(), Letter.id.desc())
     if not filters.ids:
         id_stmt = id_stmt.offset(offset).limit(limit)
     ids_result = [row[0] for row in db.execute(id_stmt).all()]
@@ -227,7 +279,12 @@ async def get_all_letter(
     letters = (
         db.query(Letter)
         .filter(Letter.id.in_(ids_result))
-        .order_by(Letter.received_datetime.desc(), Letter.id.desc())  # CHANGED — id tiebreak added,
+        .order_by(
+            func.substr(Letter.code, 1, 7).desc(),
+            func.length(Letter.code).desc(),
+            Letter.code.desc(),
+            Letter.id.desc(),
+        )  # CHANGED — same code-based order as id_stmt above; id tiebreak,
         # matching id_stmt above. Without this, rows sharing the same
         # (or near-identical) received_datetime can come back from this
         # second query in an unspecified order — a newly-inserted letter
@@ -268,16 +325,25 @@ async def letters_excel_data(db, current_user, filters):
     needs_dept_join = False
     needs_assignee_join = False
 
-    # Permission-based visibility is always enforced, even when filters.ids
-    # is set — an explicit ID list must never be able to bypass a user's
-    # department/self view scoping.
-    if 'letter.view:department' in current_user.permissions:
+    # Permission-based visibility is always enforced, even when filters.ids is set.
+    # CHANGED — department / sub-unit accounts get the same scoping as the list
+    # (before, an export from a section account ignored it).
+    if getattr(current_user, "is_department_account", False):
+        if current_user.department_unit_id:
+            conditions.append(LetterDepartment.department_unit_id == current_user.department_unit_id)
+        else:
+            conditions.append(and_(
+                LetterDepartment.department_id == current_user.department_id,
+                LetterDepartment.department_unit_id.is_(None),
+            ))
+        needs_dept_join = True
+    elif 'letter.view:department' in current_user.permissions:
         conditions.append(
             or_(
                 LetterDepartment.department_id == current_user.department_id,
                 LetterAssignee.assignee_id == current_user.id,
-                Letter.recommended_to_id == current_user.id,   # NEW
-                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
+                Letter.recommended_to_id == current_user.id,
+                Letter.forwarded_to_id == current_user.id,
             )
         )
         needs_dept_join = True
@@ -286,47 +352,51 @@ async def letters_excel_data(db, current_user, filters):
         conditions.append(
             or_(
                 LetterAssignee.assignee_id == current_user.id,
-                Letter.recommended_to_id == current_user.id,   # NEW
-                Letter.forwarded_to_id == current_user.id,   # NEW — forwarded letters must be visible to their recipient too
+                Letter.recommended_to_id == current_user.id,
+                Letter.forwarded_to_id == current_user.id,
             )
         )
         needs_assignee_join = True
     elif 'letter.view:all' not in current_user.permissions:
         return []
 
-    query = db.query(Letter)
+    code_month = func.substr(Letter.code, 1, 7)
+    code_len = func.length(Letter.code)
+
+    # ids of the rows that match (distinct), so ordering + LIMIT are applied on a
+    # clean id query and the full rows are then loaded in that same order.
+    id_query = select(Letter.id, code_month.label("code_month"), code_len.label("code_len"), Letter.code).select_from(Letter)
     if needs_dept_join:
-        query = query.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
+        id_query = id_query.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
     if needs_assignee_join:
-        query = query.outerjoin(LetterAssignee, LetterAssignee.letter_id == Letter.id)
-    query = query.filter(and_(*conditions)).distinct()
+        id_query = id_query.outerjoin(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+    id_query = id_query.where(and_(*conditions)).distinct()
 
-    # NEW — explicit ID selection (e.g. checkboxes ticked in the dashboard
-    # table) takes priority over limit/date-range: it's an exact "export
-    # these specific letters" request. We return early here so a leftover
-    # `limit` (e.g. from the export dialog's "Number of Entries" dropdown)
-    # can never silently truncate a manual selection.
     if filters.ids:
-        query = query.filter(Letter.id.in_(filters.ids))
-        query = query.order_by(Letter.received_datetime.asc(), Letter.id.asc())
-        return query.all()
+        # explicit selection (ticked rows): exactly these letters, never truncated by `limit`
+        id_query = id_query.where(Letter.id.in_(filters.ids))
+    else:
+        date_start, date_end = resolve_date_range(filters.create_date_start, filters.create_date_end)
+        if date_start:
+            id_query = id_query.where(Letter.received_datetime >= date_start)
+        if date_end:
+            id_query = id_query.where(Letter.received_datetime <= date_end)
+        if filters.is_public_complaint is not None:
+            id_query = id_query.where(Letter.is_public_complaint == filters.is_public_complaint)
 
-    if filters.create_date_start:
-        query = query.filter(Letter.received_datetime >= filters.create_date_start)
-    if filters.create_date_end:
-        query = query.filter(Letter.received_datetime <= filters.create_date_end)
-    if filters.is_public_complaint is not None:
-               query = query.filter(Letter.is_public_complaint == filters.is_public_complaint)
-    # CHANGED — order_by() must come BEFORE limit()/offset() on this legacy
-    # Query API; calling it after raised:
-    #   sqlalchemy.exc.InvalidRequestError: Query.order_by() being called on
-    #   a Query which already has LIMIT or OFFSET applied.
-    # so it's now applied first, and the limit (if any) is applied after.
-    query = query.order_by(Letter.received_datetime.asc(), Letter.id.asc())
-    if filters.limit:
-        query = query.limit(filters.limit)
-    rows = query.all()
-    return rows
+    # CHANGED — "N entries" now means the NEWEST N letters (by code), not the oldest N.
+    id_query = id_query.order_by(code_month.desc(), code_len.desc(), Letter.code.desc(), Letter.id.desc())
+    if filters.limit and not filters.ids:
+        id_query = id_query.limit(filters.limit)
+
+    ordered_ids = [row[0] for row in db.execute(id_query).all()]
+    if not ordered_ids:
+        return []
+
+    rows = db.query(Letter).filter(Letter.id.in_(ordered_ids)).all()
+    by_id = {r.id: r for r in rows}
+    # the sheet reads oldest -> newest (code ascending), like a register
+    return [by_id[i] for i in reversed(ordered_ids) if i in by_id]
 
 
 async def get_letter_count(prefix: str, db: Session) -> int:
@@ -499,3 +569,62 @@ async def permanently_delete_letter(letter_id: int, db: Session) -> None:
 
     db.query(Letter).filter(Letter.id == letter_id).delete(synchronize_session=False)
     db.commit()
+
+
+async def get_assignment_gap_counts(current_user: SystemUserWithPermissionsModelOut, db: Session) -> dict:
+    """
+    NEW — counts of ACTIVE letters (that this user is allowed to see) which
+    still have no Section routed, or no Assignee. Used by the dashboard's
+    "Section Not Selected" / "Assignee Not Selected" cards. Applies the same
+    visibility rules as get_all_letter so the card numbers always match
+    what the list shows after clicking the card.
+    """
+    conditions = [Letter.is_active]
+    needs_dept_join = False
+    needs_assignee_join = False
+
+    if getattr(current_user, "is_department_account", False):
+        if current_user.department_unit_id:
+            conditions.append(LetterDepartment.department_unit_id == current_user.department_unit_id)
+        else:
+            conditions.append(and_(
+                LetterDepartment.department_id == current_user.department_id,
+                LetterDepartment.department_unit_id.is_(None),
+            ))
+        needs_dept_join = True
+    elif 'letter.view:department' in current_user.permissions:
+        conditions.append(or_(
+            LetterDepartment.department_id == current_user.department_id,
+            LetterAssignee.assignee_id == current_user.id,
+            Letter.recommended_to_id == current_user.id,
+            Letter.forwarded_to_id == current_user.id,
+        ))
+        needs_dept_join = True
+        needs_assignee_join = True
+    elif 'letter.view:self' in current_user.permissions:
+        conditions.append(or_(
+            LetterAssignee.assignee_id == current_user.id,
+            Letter.recommended_to_id == current_user.id,
+            Letter.forwarded_to_id == current_user.id,
+        ))
+        needs_assignee_join = True
+    elif 'letter.view:all' not in current_user.permissions:
+        return {"section_not_selected": 0, "assignee_not_selected": 0}
+
+    ld = aliased(LetterDepartment)
+    la = aliased(LetterAssignee)
+    no_section = ~exists(select(ld.id).where(ld.letter_id == Letter.id).correlate(Letter))
+    no_assignee = ~exists(select(la.id).where(la.letter_id == Letter.id).correlate(Letter))
+
+    def _count(extra):
+        q = select(func.count(func.distinct(Letter.id))).select_from(Letter)
+        if needs_dept_join:
+            q = q.outerjoin(LetterDepartment, LetterDepartment.letter_id == Letter.id)
+        if needs_assignee_join:
+            q = q.outerjoin(LetterAssignee, LetterAssignee.letter_id == Letter.id)
+        return db.execute(q.where(and_(*conditions, extra))).scalar_one()
+
+    return {
+        "section_not_selected": _count(no_section),
+        "assignee_not_selected": _count(no_assignee),
+    }

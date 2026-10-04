@@ -179,3 +179,21 @@ async def get_department_accounts_by_ids(account_ids: list[int], db: Session):
         SystemUser.id.in_(account_ids),
         SystemUser.is_department_account
     ).all()
+
+
+async def get_department_account_for_user(user_id: int, db: Session):
+    """Finds the department-account row matching this user's own
+    (department_id, department_unit_id) pair, so assigning them to a
+    letter can also auto-route the letter to their own section."""
+    user = db.query(SystemUser).filter(SystemUser.id == user_id).first()
+    if not user or not user.department_id:
+        return None
+    query = db.query(SystemUser).filter(
+        SystemUser.is_department_account == True,
+        SystemUser.department_id == user.department_id,
+    )
+    if user.department_unit_id:
+        query = query.filter(SystemUser.department_unit_id == user.department_unit_id)
+    else:
+        query = query.filter(SystemUser.department_unit_id.is_(None))
+    return query.first()

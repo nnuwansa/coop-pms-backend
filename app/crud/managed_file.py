@@ -34,6 +34,7 @@ async def get_managed_files(
         department_id: Optional[int] = None,
         department_unit_id: Optional[int] = None,
         assigned_to_id: Optional[int] = None,
+        visible_to_user_id: Optional[int] = None,
 ):
     query = db.query(ManagedFile).filter(ManagedFile.is_active)
     if department_id:
@@ -42,6 +43,11 @@ async def get_managed_files(
         query = query.filter(ManagedFile.department_unit_id == department_unit_id)
     if assigned_to_id:
         query = query.filter(ManagedFile.assigned_to_id == assigned_to_id)
+    if visible_to_user_id:
+                query = query.filter(or_(
+                        ManagedFile.assigned_to_id == visible_to_user_id,
+                        ManagedFile.created_by_id == visible_to_user_id,
+            ))
     return query.order_by(ManagedFile.file_number).all()
 
 
@@ -52,7 +58,13 @@ async def get_managed_files_by_assignee(user_id: int, db: Session):
         .order_by(ManagedFile.file_number)
         .all()
     )
-
+async def get_managed_files_for_user(user, db: Session):
+    return (
+        db.query(ManagedFile)
+        .filter(ManagedFile.assigned_to_id == user.id, ManagedFile.is_active)
+        .order_by(ManagedFile.file_number)
+        .all()
+    )
 
 async def update_managed_file(managed_file: ManagedFile, db: Session) -> ManagedFile:
     db.commit()

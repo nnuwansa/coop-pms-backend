@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime, timezone
 from io import BytesIO
@@ -15,7 +14,7 @@ from config.config import ATTACHMENTS_URL, ATTACHMENTS_DIR, TIME_ZONE
 from config.constant import LETTERS_EXCEL_HEADERS
 from crud.letter import (save_letter, get_active_letter, update_letter, get_all_letter, code_exist,
                          update_letter_attribute, validate_attribute, letters_excel_data, get_letter_count,
-                         get_all_status_counts, get_last_letter_number)
+                         get_all_status_counts, get_last_letter_number, get_assignment_gap_counts)
 from crud.system_user import get_department_accounts_by_ids  # NEW — resolves department-account ids to SystemUser rows carrying (department_id, department_unit_id)
 from db.models.models import (Letter, LetterAttachment, LetterAssignee, LetterDepartment,
                                SystemUser, Department, DepartmentUnit, Status, History as HistoryModel,
@@ -35,6 +34,9 @@ from utils.email_templates import letter_received_email
 from exception.exception import ValidationException
 from utils.email_templates import letter_received_email
 from crud.letter_assignee_status import get_assignee_statuses_by_letter, get_assignee_status, create_assignee_status, delete_assignee_status
+from crud.system_user import get_department_account_for_user
+from crud.system_user import get_department_accounts_by_ids
+from crud.system_user import get_department_account_for_user
 
 logger = getLogger(__name__)
 
@@ -104,6 +106,34 @@ def _department_label(ld: "LetterDepartment") -> str:
     return ld.department.name if ld.department else "Unknown"
 
 
+async def _notify_assignee_by_email(assignee_id: int, letter: Letter, db: Session) -> None:
+    """
+    NEW — the ONLY place a "letter assigned" email is sent. It goes to the
+    officer (assignee) the letter was assigned to — never to the section /
+    department accounts the admin routed it to. Nothing is sent when the
+    letter is already "Completed", or the officer has no email on file.
+    A mail failure never breaks letter creation/assignment.
+    """
+    try:
+        status_name = letter.status.name if letter.status else None
+        if status_name == "Completed":
+            return
+        user = db.query(SystemUser).filter(
+            SystemUser.id == assignee_id, SystemUser.is_active == True
+        ).first()
+        if not user or not user.email:
+            return
+        email_subject, email_body = letter_received_email(
+            organization_name=f"{user.first_name} {user.last_name}",
+            letter_code=letter.code,
+            subject=letter.subject or "",
+            received_datetime=letter.received_datetime,
+        )
+        await send_email(user.email, email_subject, email_body)
+    except Exception:
+        logger.exception(f"Failed to email assignee {assignee_id} for letter {letter.code}")
+
+
 async def create_letter(letter_model: LetterModelIn, db: Session, current_user_id: Optional[int] = None) -> Dict:
     if await code_exist(letter_model.code, db):
         raise CodeExistException(f"Letter with code {letter_model.code} is already exist.")
@@ -112,28 +142,16 @@ async def create_letter(letter_model: LetterModelIn, db: Session, current_user_i
     letter = Letter(**letter_data)
     letter.status_id = 1
 
-
-      # NEW — optional: admin can pick who the Initials By request should go
-      # to right at creation time, instead of it always being forced to the
-      # default candidate. If left blank, no request is sent — the admin can
-      # still send one later from the Letter View page.
-
+    # optional: admin can pick who the Initials By request goes to right at creation
     if letter_model.initials_by_pending_user_id:
-              letter.initials_by_pending_user_id = letter_model.initials_by_pending_user_id
+        letter.initials_by_pending_user_id = letter_model.initials_by_pending_user_id
     saved_letter = await save_letter(letter, db)
 
-    for assignee_id in (letter_model.assignee_ids or []):
-        db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id, assigned_by_user_id=current_user_id))
+    assignee_ids = list(dict.fromkeys(letter_model.assignee_ids or []))   # de-duplicated, order kept
 
-    # NEW — give every assignee attached at CREATION time their own
-    # per-assignee status row too. Previously this only happened inside
-    # update_letter_assignment for assignees added during a later edit
-    # (added = new_ids - old_ids), so a letter created with an assignee
-    # already on it (e.g. via the "Insert Letter" form) got a LetterAssignee
-    # row but no matching LetterAssigneeStatus row — the assignee showed up
-    # under "Assignees" but had nothing in "Assignee Statuses" and nothing
-    # to update.
-    for assignee_id in (letter_model.assignee_ids or []):
+    for assignee_id in assignee_ids:
+        db.add(LetterAssignee(letter_id=saved_letter.id, assignee_id=assignee_id, assigned_by_user_id=current_user_id))
+        # every assignee gets their own per-assignee status row
         db.add(LetterAssigneeStatus(
             letter_id=saved_letter.id,
             assignee_id=assignee_id,
@@ -141,62 +159,63 @@ async def create_letter(letter_model: LetterModelIn, db: Session, current_user_i
             status_since=datetime.utcnow(),
         ))
 
-    # CHANGED — `department_ids` now carries department ACCOUNT ids
-    # (system_user.id of an is_department_account=True row), not raw
-    # Department.id. Each account already knows its own department_id and
-    # (optionally) department_unit_id, so we resolve those here and store
-    # both on the LetterDepartment row. This is what lets a letter be routed
-    # to a specific sub-unit (e.g. "Banking Regulation and Statistic Unit")
-    # instead of always collapsing to the parent section.
-    dept_accounts = await get_department_accounts_by_ids(letter_model.department_ids or [], db)
+    # `department_ids` carries department ACCOUNT ids (system_user.id of an
+    # is_department_account=True row); each account knows its own
+    # department_id + department_unit_id.
+    dept_accounts = list(await get_department_accounts_by_ids(letter_model.department_ids or [], db))
+    existing_pairs = {(a.department_id, a.department_unit_id) for a in dept_accounts}
+
+    # CHANGED — every selected assignee's own section is ALWAYS routed too
+    # (previously the frontend only did this when no section was picked yet,
+    # and the old backend loop here had an indentation error). De-duplicated
+    # on the (department, sub-unit) pair so nothing is added twice.
+    for assignee_id in assignee_ids:
+        assignee_dept_account = await get_department_account_for_user(assignee_id, db)
+        if assignee_dept_account:
+            pair = (assignee_dept_account.department_id, assignee_dept_account.department_unit_id)
+            if pair not in existing_pairs:
+                dept_accounts.append(assignee_dept_account)
+                existing_pairs.add(pair)
+
     for account in dept_accounts:
         db.add(LetterDepartment(
             letter_id=saved_letter.id,
             department_id=account.department_id,
-            department_unit_id=account.department_unit_id,  # NEW
+            department_unit_id=account.department_unit_id,
         ))
 
     db.commit()
 
-    # NEW — auto-send the Initials By confirmation request to whoever is
-    # flagged as the default candidate, right at letter creation. Saves the
-    # admin an extra manual step on Letter View for the common case; they
-    # can still change who it's sent to later from there if needed.
-    default_initials_user = db.query(SystemUser).filter(
-        SystemUser.is_default_initials_by == True,
-        SystemUser.is_active == True,
-    ).first()
-    if default_initials_user:
-        saved_letter.initials_by_pending_user_id = default_initials_user.id
-        db.add(HistoryModel(
-            description=f"Initials By requested from: {default_initials_user.first_name} {default_initials_user.last_name}",
-            username="System (auto-requested on letter creation)",
-            email="",
-            letter_id=saved_letter.id,
-        ))
-        db.commit()
-
-      # NEW — history entry so it's visible in the letter's audit trail that
-      # this was requested at creation time, not later from Letter View
-
-    target = None  # NEW — always define before the conditional block, so the
-    # later `if target:` check never crashes with
-    # UnboundLocalError when initials_by_pending_user_id wasn't provided
+    # auto-request Initials By from the default candidate ONLY when the admin
+    # didn't explicitly choose someone (previously this silently overwrote an
+    # explicit choice made on the Insert Letter form).
+    if not letter_model.initials_by_pending_user_id:
+        default_initials_user = db.query(SystemUser).filter(
+            SystemUser.is_default_initials_by == True,
+            SystemUser.is_active == True,
+        ).first()
+        if default_initials_user:
+            saved_letter.initials_by_pending_user_id = default_initials_user.id
+            db.add(HistoryModel(
+                description=f"Initials By requested from: {default_initials_user.first_name} {default_initials_user.last_name}",
+                username="System (auto-requested on letter creation)",
+                email="",
+                letter_id=saved_letter.id,
+            ))
+            db.commit()
 
     if letter_model.initials_by_pending_user_id:
         target = db.query(SystemUser).filter(SystemUser.id == letter_model.initials_by_pending_user_id).first()
+        if target:
+            db.add(HistoryModel(
+                description=f"Initials By requested from: {target.first_name} {target.last_name} (at creation)",
+                username="System User" if current_user_id else "System",
+                email="",
+                letter_id=saved_letter.id,
+            ))
+            db.commit()
 
-    if target:
-        db.add(HistoryModel(
-            description=f"Initials By requested from: {target.first_name} {target.last_name} (at creation)",
-            username=f"{current_user_id and 'System User' or 'System'}",
-            email="",
-            letter_id=saved_letter.id,
-        ))
-        db.commit()
-
-    # NEW — notify the organization by email that their letter was received,
-    # if an organization is linked and has an email on file
+    # acknowledgement to the SENDER organization (unchanged behaviour)
     if letter_model.organization_id:
         organization = await get_organization_by_id(letter_model.organization_id, db)
         if organization and organization.email:
@@ -208,23 +227,11 @@ async def create_letter(letter_model: LetterModelIn, db: Session, current_user_i
             )
             await send_email(organization.email, email_subject, email_body)
 
-    # CHANGED — notify each routed department/unit's email, using the
-    # already-resolved dept_accounts (also fixes the previous dead code
-    # after `return`, and the undefined `get_department_by_id` call).
-    for account in dept_accounts:
-        notify_email = (
-            account.department_unit.email
-            if account.department_unit and account.department_unit.email
-            else (account.department.email if account.department else None)
-        )
-        if notify_email:
-            email_subject, email_body = letter_received_email(
-                organization_name=_department_label_for_account(account),
-                letter_code=saved_letter.code,
-                subject=saved_letter.subject or "",
-                received_datetime=saved_letter.received_datetime,
-            )
-            await send_email(notify_email, email_subject, email_body)
+    # CHANGED — the pending-letter email now goes ONLY to the officers the
+    # letter was assigned to. Section / department accounts are no longer
+    # emailed (they still SEE the letter, they just aren't mailed).
+    for assignee_id in assignee_ids:
+        await _notify_assignee_by_email(assignee_id, saved_letter, db)
 
     return {'id': saved_letter.id, 'code': saved_letter.code}
 
@@ -593,6 +600,9 @@ async def get_list_letters(
             assignee_ids=[la.assignee_id for la in letter.assignees],
             other=letter.other,
             sender_subject_no=letter.sender_subject_no,
+            sender=letter.sender,          # NEW
+            email=letter.email,            # NEW
+            telephone=letter.telephone,    # NEW
             forwarded_to=(
                 f"{letter.forwarded_to.first_name} {letter.forwarded_to.last_name}"
                 if getattr(letter, "forwarded_to", None) else None
@@ -770,7 +780,12 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
     rows = await letters_excel_data(db, current_user, filters)
 
     if filters.columns:
-        selected_headers = [h for h in LETTERS_EXCEL_HEADERS if h[1] in filters.columns]
+        # CHANGED — the Excel columns now come out in the SAME ORDER as the
+        # export dialog's column list (so e.g. "Subject/Content" sits right
+        # after "Sender's Address"), instead of the fixed order of
+        # LETTERS_EXCEL_HEADERS.
+        header_by_key = {h[1]: h for h in LETTERS_EXCEL_HEADERS}
+        selected_headers = [header_by_key[c] for c in filters.columns if c in header_by_key]
     else:
         selected_headers = LETTERS_EXCEL_HEADERS
 
@@ -816,6 +831,12 @@ async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWith
                     f"{la.assignee.first_name} {la.assignee.last_name}"
                     for la in obj.assignees if la.assignee
                 ]) if obj.assignees else None
+            elif col_name == "completion_file_name":
+                # CHANGED — the per-assignee File Names (that's where they are really saved)
+                names = [f"{r.assignee.first_name} {r.assignee.last_name}: {r.file_name}"
+                         for r in (getattr(obj, "assignee_statuses", None) or [])
+                         if getattr(r, "file_name", None) and getattr(r, "assignee", None)]
+                value = "; ".join(names) if names else obj.completion_file_name
             elif col_name == "attachments":
                 value = len(obj.attachments) if obj.attachments else 0
             elif col_name == "cheque_details":
@@ -925,8 +946,8 @@ async def duplicate_letter(letter_id: int, db: Session):
 async def update_letter_assignment(
         letter_id: int,
         status_id: Optional[int],
-        department_ids: List[int],
-        assignee_ids: List[int],
+        department_ids: Optional[List[int]],   # CHANGED — None = "not sent, leave untouched"
+        assignee_ids: Optional[List[int]],     # CHANGED — None = "not sent, leave untouched"
         db: Session,
         username: str = "System",
         email: str = "",
@@ -951,8 +972,19 @@ async def update_letter_assignment(
         subject: Optional[str] = None,              # NEW
         can_update_details: bool = False,            # NEW
         organization_id: Optional[int] = None,       # NEW
+        provided_fields: Optional[set] = None,       # NEW — fields the client actually sent (payload.model_fields_set)
 ):
     logger.info("Update letter assignment process started")
+
+    # NEW — the Quick Edit / Quick Order By dialogs only send a few fields.
+    # Before, every field NOT sent defaulted to []/None and was treated as
+    # "clear it", so e.g. saving only Order By from the dashboard wiped the
+    # letter's sections, assignees, recommendation and forward. A field is
+    # now only touched when the client actually sent it.
+    def _provided(name: str) -> bool:
+        return provided_fields is None or name in provided_fields
+
+    newly_assigned_ids: List[int] = []   # officers to email after commit
 
     letter = await get_active_letter(letter_id, db)
 
@@ -1002,17 +1034,11 @@ async def update_letter_assignment(
             db.add(HistoryModel(description=desc, username=username, email=email, letter_id=letter_id))
 
     # ── Departments ───────────────────────────────────────────────────────────
-    # CHANGED — `department_ids` are department ACCOUNT ids (system_user.id
-    # of is_department_account=True rows), not raw Department.id. We resolve
-    # each account to its (department_id, department_unit_id) pair and store
-    # both on LetterDepartment, so a letter routed to a sub-unit account
-    # (e.g. "Banking Regulation and Statistic Unit") stays scoped to that
-    # unit instead of collapsing to the parent section. Comparison/dedup is
-    # done on the (department_id, department_unit_id) pair, not on
-    # department_id alone — two different sub-unit accounts under the same
-    # section must be distinguishable.
-    if can_change_department:
-        dept_accounts = await get_department_accounts_by_ids(department_ids, db)
+    # `department_ids` are department ACCOUNT ids. Compared on the
+    # (department_id, department_unit_id) pair. NO email is sent to section
+    # accounts any more — only assigned officers are emailed (see below).
+    if can_change_department and department_ids is not None:
+        dept_accounts = list(await get_department_accounts_by_ids(department_ids, db))
 
         if allowed_department_ids:
             disallowed = {a.department_id for a in dept_accounts} - set(allowed_department_ids)
@@ -1036,24 +1062,10 @@ async def update_letter_assignment(
                 ))
 
             for account in added_accounts:
-                label = _department_label_for_account(account)
                 db.add(HistoryModel(
-                    description=f"Department added: {label}",
+                    description=f"Department added: {_department_label_for_account(account)}",
                     username=username, email=email, letter_id=letter_id
                 ))
-                notify_email = (
-                    account.department_unit.email
-                    if account.department_unit and account.department_unit.email
-                    else (account.department.email if account.department else None)
-                )
-                if notify_email:
-                    email_subject, email_body = letter_received_email(
-                        organization_name=label,
-                        letter_code=letter.code,
-                        subject=letter.subject or "",
-                        received_datetime=letter.received_datetime,
-                    )
-                    await send_email(notify_email, email_subject, email_body)
 
             for dept_id, unit_id in removed_pairs:
                 dept = db.query(Department).filter(Department.id == dept_id).first()
@@ -1061,47 +1073,65 @@ async def update_letter_assignment(
                 label = unit.name if unit else (dept.name if dept else "Unknown")
                 db.add(HistoryModel(
                     description=f"Department removed: {label}",
-                    username=username,
-                    email=email,
-                    letter_id=letter_id
+                    username=username, email=email, letter_id=letter_id
                 ))
-        else:
-            db.query(LetterDepartment).filter(LetterDepartment.letter_id == letter_id).delete()
-            for account in dept_accounts:
-                db.add(LetterDepartment(
-                    letter_id=letter_id,
-                    department_id=account.department_id,
-                    department_unit_id=account.department_unit_id,
-                ))
+        # unchanged -> leave the rows alone (no pointless delete + re-insert)
 
     # ── Assignees ─────────────────────────────────────────────────────────────
-    if can_assign:
+    if can_assign and assignee_ids is not None:
+        new_ids = list(dict.fromkeys(assignee_ids))
         old_assignee_ids = {la.assignee_id for la in letter.assignees}
-        new_assignee_ids = set(assignee_ids)
+        new_assignee_ids = set(new_ids)
 
         if old_assignee_ids != new_assignee_ids:
             added = new_assignee_ids - old_assignee_ids
             removed = old_assignee_ids - new_assignee_ids
 
-            # NEW — preserve who originally added each STILL-PRESENT assignee
-             # before we wipe and re-insert the rows below
-            existing_assigned_by = {la.assignee_id: la.assigned_by_user_id for la in letter.assignees}
+            # CHANGED — each newly-added assignee's own section is routed
+            # too. The old loop here was mis-indented, so only the LAST
+            # added assignee's section was ever checked. Dedup is now on the
+            # (department, sub-unit) pair, read fresh from the DB after the
+            # Departments block above.
+            db.flush()
+            existing_pairs = {
+                (ld.department_id, ld.department_unit_id)
+                for ld in db.query(LetterDepartment).filter(LetterDepartment.letter_id == letter_id).all()
+            }
+            for assignee_id in new_ids:
+                if assignee_id not in added:
+                    continue
+                acc = await get_department_account_for_user(assignee_id, db)
+                if acc:
+                    pair = (acc.department_id, acc.department_unit_id)
+                    if pair not in existing_pairs:
+                        db.add(LetterDepartment(
+                            letter_id=letter_id,
+                            department_id=acc.department_id,
+                            department_unit_id=acc.department_unit_id,
+                        ))
+                        existing_pairs.add(pair)
+                        db.add(HistoryModel(
+                            description=f"Department added (assignee's section): {_department_label_for_account(acc)}",
+                            username=username, email=email, letter_id=letter_id
+                        ))
 
-            db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
-            for assignee_id in assignee_ids:
-                db.add(LetterAssignee(
-                      letter_id = letter_id,
-                      assignee_id = assignee_id,
-                  # NEW ones get the current user; ones that already existed keep their original assigner
-                      assigned_by_user_id = existing_assigned_by.get(assignee_id,
-                                                                                   current_user_id) if assignee_id not in added else current_user_id,
-                ))
+            # CHANGED — only touch the rows that actually changed, so the
+            # original "Assigned By" of unchanged assignees is never lost.
+            if removed:
+                db.query(LetterAssignee).filter(
+                    LetterAssignee.letter_id == letter_id,
+                    LetterAssignee.assignee_id.in_(removed),
+                ).delete(synchronize_session=False)
+            for a_id in new_ids:
+                if a_id in added:
+                    db.add(LetterAssignee(
+                        letter_id=letter_id, assignee_id=a_id, assigned_by_user_id=current_user_id,
+                    ))
 
-            # NEW — give each newly-added assignee their own status row, defaulting to the letter's current status
+            # each newly-added assignee gets their own status row
             for a_id in added:
                 existing = await get_assignee_status(letter_id, a_id, db)
                 if not existing:
-                    from db.models.models import LetterAssigneeStatus
                     db.add(LetterAssigneeStatus(
                         letter_id=letter_id,
                         assignee_id=a_id,
@@ -1109,7 +1139,6 @@ async def update_letter_assignment(
                         status_since=datetime.utcnow(),
                     ))
 
-            # NEW — clean up status rows for assignees who were removed
             for a_id in removed:
                 await delete_assignee_status(letter_id, a_id, db)
 
@@ -1127,10 +1156,9 @@ async def update_letter_assignment(
                         description=f"Assignee removed: {user.first_name} {user.last_name}",
                         username=username, email=email, letter_id=letter_id
                     ))
-        else:
-            db.query(LetterAssignee).filter(LetterAssignee.letter_id == letter_id).delete()
-            for assignee_id in assignee_ids:
-                db.add(LetterAssignee(letter_id=letter_id, assignee_id=assignee_id))
+
+            newly_assigned_ids = [a_id for a_id in new_ids if a_id in added]
+        # unchanged -> leave rows alone
 
     # ── Recommended To ───────────────────────────────────────────────────────
     # CHANGED — was `if can_assign and recommended_to_id is not None:`, which
@@ -1139,7 +1167,7 @@ async def update_letter_assignment(
     # field, because `None` from an explicit null is indistinguishable from
     # `None` as "not provided". The permission check now happens only when a
     # real id is being set; clearing (None) always goes through.
-    if can_assign:
+    if can_assign and _provided("recommended_to_id"):
         if recommended_to_id is not None and allowed_assignee_role_ids:
             target_user = db.query(SystemUser).filter(SystemUser.id == recommended_to_id).first()
             if target_user and target_user.role_id not in allowed_assignee_role_ids:
@@ -1172,7 +1200,7 @@ async def update_letter_assignment(
     # `Letter.forwarded_to_id` is also included in the visibility conditions
     # in crud/letter.py, so the person a letter is forwarded to can actually
     # see it in their letters list — not just in this letter's detail view.
-    if can_forward:
+    if can_forward and _provided("forwarded_to_id"):
         if letter.forwarded_to_id != forwarded_to_id:
             new_target = db.query(SystemUser).filter(SystemUser.id == forwarded_to_id).first() if forwarded_to_id else None
             old_target = db.query(SystemUser).filter(SystemUser.id == letter.forwarded_to_id).first() if letter.forwarded_to_id else None
@@ -1199,10 +1227,10 @@ async def update_letter_assignment(
     # etc), both drawn from the same OrderByOption table, distinguished by
     # `category`. order_by_set_by_user_id is always the CURRENT user,
     # supplied by the API layer from their token — never client-supplied.
-    if can_order_by:
+    if can_order_by and (_provided("order_by_role_id") or _provided("order_by_action_id")):
         changed = False
 
-        if letter.order_by_role_id != order_by_role_id:
+        if _provided("order_by_role_id") and letter.order_by_role_id != order_by_role_id:
             new_role = db.query(OrderByOption).filter(
                 OrderByOption.id == order_by_role_id
             ).first() if order_by_role_id else None
@@ -1224,7 +1252,7 @@ async def update_letter_assignment(
                     username=username, email=email, letter_id=letter_id
                 ))
 
-        if letter.order_by_action_id != order_by_action_id:
+        if _provided("order_by_action_id") and letter.order_by_action_id != order_by_action_id:
             new_action = db.query(OrderByOption).filter(
                 OrderByOption.id == order_by_action_id
             ).first() if order_by_action_id else None
@@ -1252,6 +1280,12 @@ async def update_letter_assignment(
             )
 
     db.commit()
+
+    # NEW — email ONLY the officers who were just assigned (skipped when the
+    # letter is already Completed). Section accounts are never emailed.
+    for a_id in newly_assigned_ids:
+        await _notify_assignee_by_email(a_id, letter, db)
+
     logger.info("Update letter assignment process ended")
 
 
@@ -1516,3 +1550,9 @@ async def bulk_confirm_initials_by(letter_ids: List[int], notes: Optional[str], 
 
     db.commit()
     return {"confirmed": confirmed_ids, "skipped": skipped_ids}
+
+
+async def get_letter_assignment_gap_counts(current_user: SystemUserWithPermissionsModelOut, db: Session):
+    """Counts of letters still missing a Section / an Assignee — drives the
+    two dashboard cards that replaced the 'Assigned' / 'In Progress' cards."""
+    return await get_assignment_gap_counts(current_user, db)

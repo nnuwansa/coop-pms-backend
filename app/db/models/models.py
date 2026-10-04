@@ -416,10 +416,13 @@ class ManagedFile(Base):
     assigned_to_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     create_datetime = Column(DateTime, default=func.utc_timestamp())
+    created_by_id = Column(Integer, ForeignKey("system_user.id"), nullable=True)
+
 
     department = relationship("Department")
     department_unit = relationship("DepartmentUnit")
-    assigned_to = relationship("SystemUser")
+    assigned_to = relationship("SystemUser", foreign_keys=[assigned_to_id])
+    created_by = relationship("SystemUser", foreign_keys=[created_by_id])
 
 
 class OrderByOption(Base):

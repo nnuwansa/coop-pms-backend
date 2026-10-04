@@ -23,6 +23,8 @@ class LetterFilter(BaseModel):
     pending_days_max: Optional[int] = None
     assignee_status_id: Optional[int] = None
     is_public_complaint: Optional[bool] = None
+    no_section: Optional[bool] = None    # NEW — only letters that have NO section routed yet
+    no_assignee: Optional[bool] = None   # NEW — only letters that have NO assignee yet
 
 
 class LetterModelIn(BaseModel):
@@ -267,6 +269,9 @@ class LetterModelOutList(BaseModel):
     organization: Optional[str]
     other: Optional[str]
     sender_subject_no: Optional[str] = None
+    sender: Optional[str] = None      # NEW — Sender's Address (needed by the dashboard Print report)
+    email: Optional[str] = None       # NEW — Sender's Email
+    telephone: Optional[str] = None   # NEW — Sender's Telephone
     status_since: Optional[datetime] = None  # NEW
     status_days: Optional[int] = None  # NEW
     completion_file_name: Optional[str] = None  # NEW — File Name, shown/exported when a status required and saved one
