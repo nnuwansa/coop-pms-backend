@@ -6,7 +6,8 @@ from typing import Optional, List, Dict
 from utils.email_templates import letter_received_email
 from fastapi import UploadFile
 from openpyxl.workbook import Workbook
-from openpyxl.styles import Font, Alignment  # NEW — for the report heading
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side  # report heading + table styling
+from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -774,101 +775,157 @@ async def switch_letter_attribute(
     }
 
 
+# Excel columns: key -> (heading, column width in characters).
+# The HEADINGS are the same ones the dashboard's printed report uses, so the
+# Excel file and the printout read identically. The ORDER of the columns is the
+# order the export dialog sends them in.
+EXCEL_COLUMNS = {
+    "id": ("#", 6),
+    "code": ("Code", 16),
+    "organization.name": ("Sender/Organization of the letter", 30),
+    "sender": ("Sender's Address", 30),
+    "subject": ("Subject/Content of the letter", 65),
+    "sender_subject_no": ("Sender's Subject No", 20),
+    "department.name": ("Section", 24),
+    "assignee": ("Assignee", 26),
+    "email": ("Email", 30),
+    "telephone": ("Telephone", 16),
+    "source.name": ("Source", 18),
+    "status.name": ("Status", 14),
+    "completion_file_name": ("File Name", 26),
+    "other": ("Cheque no /Money Order No", 26),
+    "cheque_details": ("Cheque Details", 34),
+    "attachments": ("Attachments Count", 14),
+    "received_datetime": ("Received Date", 15),
+    "create_datetime": ("Create Date", 15),
+    "update_datetime": ("Update Date", 15),
+    "is_public_complaint": ("Public Complaint", 16),
+}
+
+# used when the caller sends no column list
+EXCEL_DEFAULT_KEYS = [
+    "id", "code", "organization.name", "sender", "subject", "sender_subject_no",
+    "department.name", "assignee", "email", "source.name", "completion_file_name",
+    "other", "received_datetime",
+]
+
+
+def _excel_local_date(value) -> Optional[str]:
+    if not value:
+        return None
+    return value.replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d")
+
+
+def _excel_value(obj: Letter, key: str, row_number: int):
+    """The text/number that goes into one Excel cell."""
+    if key == "id":
+        return row_number                                   # running number, like the "#" column of the printout
+    if key == "organization.name":
+        return obj.organization.name if obj.organization else None
+    if key == "source.name":
+        return obj.source.name if obj.source else None
+    if key == "status.name":
+        return obj.status.name if obj.status else None
+    if key == "department.name":
+        labels = [_department_label(ld) for ld in obj.departments if ld.department]
+        return ", ".join(labels) if labels else None
+    if key == "assignee":
+        names = [f"{la.assignee.first_name} {la.assignee.last_name}".strip()
+                 for la in obj.assignees if la.assignee]
+        return ", ".join(names) if names else None
+    if key == "completion_file_name":
+        # File Names are saved per assignee; fall back to the old single field
+        names = [f"{r.assignee.first_name} {r.assignee.last_name}".strip() + f": {r.file_name}"
+                 for r in (obj.assignee_statuses or [])
+                 if r.file_name and r.assignee]
+        return "; ".join(names) if names else obj.completion_file_name
+    if key == "attachments":
+        return len(obj.attachments) if obj.attachments else 0
+    if key == "cheque_details":
+        if not obj.other:
+            return None
+        if not obj.cheque_deposited:
+            return "Not deposited"
+        parts = ["Deposited"]
+        if obj.cheque_deposit_date:
+            parts.append(_excel_local_date(obj.cheque_deposit_date))
+        if obj.cheque_bank:
+            parts.append(f"{obj.cheque_bank} ({obj.cheque_branch})" if obj.cheque_branch else obj.cheque_bank)
+        if obj.cheque_account_no:
+            parts.append(f"A/C {obj.cheque_account_no}")
+        return " · ".join(parts)
+    if key in ("received_datetime", "create_datetime", "update_datetime"):
+        return _excel_local_date(getattr(obj, key))
+    if key == "is_public_complaint":
+        return "Yes" if obj.is_public_complaint else "No"
+    return getattr(obj, key, None)
+
+
 async def letters_excel(filters: LetterExcelFilter, current_user: SystemUserWithPermissionsModelOut, db: Session):
     logger.info("Excel generation process started")
 
     rows = await letters_excel_data(db, current_user, filters)
 
-    if filters.columns:
-        # CHANGED — the Excel columns now come out in the SAME ORDER as the
-        # export dialog's column list (so e.g. "Subject/Content" sits right
-        # after "Sender's Address"), instead of the fixed order of
-        # LETTERS_EXCEL_HEADERS.
-        header_by_key = {h[1]: h for h in LETTERS_EXCEL_HEADERS}
-        selected_headers = [header_by_key[c] for c in filters.columns if c in header_by_key]
-    else:
-        selected_headers = LETTERS_EXCEL_HEADERS
+    keys = [c for c in (filters.columns or []) if c in EXCEL_COLUMNS] or list(EXCEL_DEFAULT_KEYS)
+    # the printed report has a trailing "Signature" column — the sheet gets the same one
+    headings = [EXCEL_COLUMNS[k][0] for k in keys] + ["Signature"]
+    widths = [EXCEL_COLUMNS[k][1] for k in keys] + [18]
+    num_cols = len(headings)
+    header_row = 4
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Letters"
 
-    num_cols = max(len(selected_headers), 1)
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # title block (rows 1-2), blank spacer (row 3)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
-    heading_cell = ws.cell(row=1, column=1, value="Department of Cooperative Development")
-    heading_cell.font = Font(bold=True, size=14)
-    heading_cell.alignment = Alignment(horizontal="center")
+    c = ws.cell(row=1, column=1, value="Department of Cooperative Development")
+    c.font = Font(bold=True, size=14)
+    c.alignment = Alignment(horizontal="center")
 
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=num_cols)
-    subheading_cell = ws.cell(row=2, column=1, value="COOP PMS - Letters Report")
-    subheading_cell.font = Font(italic=True, size=11)
-    subheading_cell.alignment = Alignment(horizontal="center")
+    c = ws.cell(row=2, column=1, value="COOP PMS - Letters Report")
+    c.font = Font(italic=True, size=11)
+    c.alignment = Alignment(horizontal="center")
 
-    header_row_index = 4
-    ws.append([])  # row 3 — blank spacer
-    ws.append([h[0] for h in selected_headers])  # row 4 — column headers
+    # column headings (row 4) — bold, shaded, wrapped, bordered
+    header_fill = PatternFill("solid", start_color="F2F2F2", end_color="F2F2F2")
+    for col_idx, heading in enumerate(headings, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=heading)
+        cell.font = Font(bold=True, size=10)
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    for obj in rows:
-        row_data = []
-        for _, col_name in selected_headers:
-            if "." in col_name:
-                parent, child = col_name.split(".")
-                if parent == "department":
-                    # CHANGED — sub-unit name where set, else parent department
-                    value = ", ".join([
-                        _department_label(ld)
-                        for ld in obj.departments if ld.department
-                    ]) if obj.departments else None
-                elif parent == "assignee":
-                    value = ", ".join([
-                        f"{la.assignee.first_name} {la.assignee.last_name}"
-                        for la in obj.assignees if la.assignee
-                    ]) if obj.assignees else None
-                else:
-                    value = getattr(getattr(obj, parent), child) if getattr(obj, parent, None) else None
-            elif col_name == "assignee":
-                value = ", ".join([
-                    f"{la.assignee.first_name} {la.assignee.last_name}"
-                    for la in obj.assignees if la.assignee
-                ]) if obj.assignees else None
-            elif col_name == "completion_file_name":
-                # CHANGED — the per-assignee File Names (that's where they are really saved)
-                names = [f"{r.assignee.first_name} {r.assignee.last_name}: {r.file_name}"
-                         for r in (getattr(obj, "assignee_statuses", None) or [])
-                         if getattr(r, "file_name", None) and getattr(r, "assignee", None)]
-                value = "; ".join(names) if names else obj.completion_file_name
-            elif col_name == "attachments":
-                value = len(obj.attachments) if obj.attachments else 0
-            elif col_name == "cheque_details":
-                # NEW — combined single column instead of 5 separate ones
-                # (deposited / date / account / bank / branch). Only makes
-                # sense when there's a cheque number on the letter at all.
-                if not obj.other:
-                    value = None
-                elif not obj.cheque_deposited:
-                    value = "Not deposited"
-                else:
-                    parts = ["Deposited"]
-                    if obj.cheque_deposit_date:
-                        parts.append(obj.cheque_deposit_date.replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d"))
-                    if obj.cheque_bank:
-                        bank_part = obj.cheque_bank
-                        if obj.cheque_branch:
-                            bank_part += f" ({obj.cheque_branch})"
-                        parts.append(bank_part)
-                    if obj.cheque_account_no:
-                        parts.append(f"A/C {obj.cheque_account_no}")
-                    value = " · ".join(parts)
-            elif col_name in ["received_datetime", "create_datetime", "update_datetime"]:
-                value = getattr(obj, col_name).replace(tzinfo=timezone.utc).astimezone(TIME_ZONE).strftime("%Y-%m-%d")
-            elif col_name == "is_public_complaint":
-                value = "Yes" if obj.is_public_complaint else "No"
-            else:
-                value = getattr(obj, col_name)
-            row_data.append(value)
-        ws.append(row_data)
+    # data rows — wrapped + top-aligned, so long subjects / names / e-mails are fully readable
+    for row_number, obj in enumerate(rows, start=1):
+        excel_row = header_row + row_number
+        for col_idx, key in enumerate(keys, start=1):
+            value = _excel_value(obj, key, row_number)
+            cell = ws.cell(row=excel_row, column=col_idx, value=value)
+            cell.font = Font(size=10)
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=True,
+                                       horizontal="center" if key in ("id", "attachments") else "left")
+        sig = ws.cell(row=excel_row, column=num_cols, value=None)
+        sig.border = border
 
-    ws.print_title_rows = f'1:{header_row_index}'
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    last_row = header_row + max(len(rows), 1)
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)            # headings stay visible while scrolling
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(num_cols)}{last_row}"
+
+    # printing: landscape, fit all columns on the page width, repeat the headings on every page
+    ws.print_title_rows = f"1:{header_row}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     output = BytesIO()
     wb.save(output)
